@@ -1,0 +1,6 @@
+# playwright 仅用于类型导入与回退；版本需与 patchright 的 pyee>=13 兼容。
+playwright==1.60.0
+# patchright 是反检测修补版 Playwright（修复 CDP Runtime.enable 泄露等），用于通过
+# Cloudflare Turnstile。它自带修补过的驱动，配合 channel=chrome 无需额外下载浏览器。
+patchright==1.60.1
+requests==2.32.3

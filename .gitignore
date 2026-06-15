@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+
+# 虚拟环境
+.venv/
+venv/
+
+# 运行产物 / 调试文件
+debug/
+scripts/debug/
+*.log
+cursor-cookies.json
+
+# 本地调试副本
+/1/
+still-on-password-after-code-click.png
