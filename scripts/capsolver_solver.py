@@ -27,14 +27,18 @@ import requests
 
 CAPSOLVER_API_BASE = os.environ.get("CAPSOLVER_API_BASE", "https://api.capsolver.com").rstrip("/")
 
-# 在页面脚本执行前 hook window.turnstile.render：
-#  - 记录每个 widget 的 sitekey / action / cdata（隐形 Turnstile 唯一能拿到 sitekey 的途径）；
-#  - 记录 callback，拿到 token 后像真实校验通过那样回调宿主页面。
+# 在页面脚本执行前 hook：捕获 Turnstile 的 sitekey / action / cdata 与 callback，
+# 拿到 CapSolver token 后像真实校验通过那样回调宿主页面。
 #
-# 关键：用 Object.defineProperty 拦截 window.turnstile 的「赋值动作」，
-# 站点（Cloudflare api.js）一赋值，setter 当场把 .render 包好——彻底消除
-# 「轮询打补丁抢不过站点同步调用 render()」的竞态（这正是之前 callback 从未被
-# 捕获、token 无处注入的根因）。defineProperty 失败时再退回轮询。
+# 关键教训（实测 + 反编译 api.js 验证）：绝不能用 Object.defineProperty 预先定义
+# window.turnstile。Cloudflare 的 api.js 用 `("turnstile" in window)` 判断是否“重复导入”，
+# 一旦为真就走 "Turnstile already has been loaded" 分支、拒绝把真实实现赋给 window.turnstile，
+# 导致它永远 undefined（widget 永不渲染、验证码发不出）。
+#
+# 正确做法：拦截 window.onloadTurnstileCallback（Cursor 用 ?onload=onloadTurnstileCallback）。
+# api.js 先把真实实现赋给 window.turnstile，再（setTimeout 0、并有 1s 重试）调用该 onload
+# 回调；我们在调用前把 turnstile.render 包好，于是页面 render() 一定被我们捕获——既不破坏
+# api.js 的加载，又能稳拿 sitekey 与真正的 React 回调。另加高频轮询兜底。
 TURNSTILE_HOOK_SCRIPT = """
 (() => {
   if (window.__cfHookInstalled) return;
@@ -80,23 +84,35 @@ TURNSTILE_HOOK_SCRIPT = """
     return ts;
   };
 
-  let _ts = window.turnstile;
-  if (_ts) wrap(_ts);
-  try {
-    Object.defineProperty(window, 'turnstile', {
-      configurable: true,
-      get() { return _ts; },
-      set(v) { _ts = wrap(v); },
-    });
-  } catch (e) {
-    // 极少数环境 defineProperty 失败：退回高频轮询兜底。
-    const timer = setInterval(() => { if (window.turnstile) wrap(window.turnstile); }, 30);
-    setTimeout(() => clearInterval(timer), 60000);
-  }
+  // 拦截 onload 回调：调用前先把 render 包好（此时 window.turnstile 已被 api.js 真实赋值）。
+  const wrapOnload = (fn) => {
+    try {
+      if (typeof fn !== 'function' || fn.__cfWrapped) return fn;
+      const wrapped = function () {
+        try { if (window.turnstile) wrap(window.turnstile); } catch (e) {}
+        return fn.apply(this, arguments);
+      };
+      wrapped.__cfWrapped = true;
+      return wrapped;
+    } catch (e) { return fn; }
+  };
 
-  // render 可能在对象赋值后才挂上（懒加载）：短时间内持续尝试补包，确保不漏。
-  const reWrap = setInterval(() => { if (_ts) wrap(_ts); }, 50);
-  setTimeout(() => clearInterval(reWrap), 60000);
+  let _onload = window.onloadTurnstileCallback;
+  if (_onload) _onload = wrapOnload(_onload);
+  try {
+    Object.defineProperty(window, 'onloadTurnstileCallback', {
+      configurable: true,
+      get() { return _onload; },
+      set(v) { _onload = wrapOnload(v); },
+    });
+  } catch (e) {}
+
+  // 兜底：只读探测 window.turnstile（读操作不会让 "turnstile" in window 变真），
+  // 一旦出现就尽快包 render，覆盖非 onload 路径。
+  const timer = setInterval(() => {
+    try { if (window.turnstile) wrap(window.turnstile); } catch (e) {}
+  }, 10);
+  setTimeout(() => clearInterval(timer), 120000);
 })();
 """
 
@@ -203,18 +219,9 @@ KICK_RENDER_SCRIPT = """
     const rendered = (window.__cfTurnstileParams || []).length > 0
       || (cont && cont.childElementCount > 0);
     if (rendered) return 'already-rendered';
-    if (typeof window.turnstile === 'undefined') {
-      if (!window.__cfReinjected) {
-        window.__cfReinjected = true;
-        const s = document.createElement('script');
-        s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js'
-              + '?onload=onloadTurnstileCallback&render=explicit';
-        s.async = true; s.defer = true;
-        (document.head || document.documentElement).appendChild(s);
-        return 'reinjected-apijs';
-      }
-      return 'turnstile-undefined';
-    }
+    if (typeof window.turnstile === 'undefined') return 'turnstile-undefined';
+    // turnstile 已就绪但 widget 没渲染：手动触发页面的 onload 回调（已被 hook 包裹，
+    // 会先把 render 包好再渲染），让真正的 React 回调注册进来。
     if (typeof window.onloadTurnstileCallback === 'function') {
       window.onloadTurnstileCallback();
       return 'called-onload';
