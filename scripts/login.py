@@ -591,6 +591,14 @@ def enter_verification_code(page: Page, code: str) -> None:
 
 def login_with_email_code(context: BrowserContext, page: Page, email: str, password: str) -> None:
     mailbox = MailboxClient(email, password)
+
+    # 记录“点击获取验证码之前”的基线：当前收件箱里最新一封 Cursor 登录邮件的时间。
+    # 之后只接受 date 严格晚于该基线的邮件，确保拿到的是本次点击发出的验证码，
+    # 而不是收件箱里残留的旧码。
+    log("[login] 记录邮箱基线（点击发码前最新一封 Cursor 邮件时间）...")
+    baseline = mailbox.latest_cursor_date()
+    log(f"[login] 邮箱基线时间: {baseline.isoformat() if baseline else '无（收件箱暂无 Cursor 邮件）'}")
+
     mailbox_page = context.new_page()
 
     fill_email_and_submit(page, email)
@@ -607,10 +615,12 @@ def login_with_email_code(context: BrowserContext, page: Page, email: str, passw
                 "请查看 debug/code-input-missing.png"
             )
 
-    log("[login] 正在从星辰邮箱大师获取验证码...")
+    log("[login] 正在从星辰邮箱大师获取验证码（仅接受点击发码之后的新邮件）...")
     log(f"[login] 邮箱页面: {mailbox.frontend_url()}")
     try:
-        code = mailbox.wait_for_code(timeout=180, interval=8, page=mailbox_page)
+        code = mailbox.wait_for_code(
+            timeout=180, interval=5, page=mailbox_page, after=baseline
+        )
     finally:
         mailbox_page.close()
 

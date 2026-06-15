@@ -73,8 +73,22 @@ jobs:
           path: scripts/cursor-cookies.json
           if-no-files-found: error
 
-      - name: Print cookies to log
+      - name: Print cookies to job summary
+        if: always()
         run: |
+          COOKIE_FILE=scripts/cursor-cookies.json
+          {
+            echo "## Cursor Cookies (Cookie-Editor JSON)"
+            echo ""
+            if [ -s "$COOKIE_FILE" ]; then
+              echo '```json'
+              cat "$COOKIE_FILE"
+              echo '```'
+            else
+              echo "⚠️ 未生成 \`cursor-cookies.json\`（登录可能失败，请查看日志与 debug artifacts）。"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
           echo "========== Cursor Cookies (Cookie-Editor JSON) =========="
-          cat scripts/cursor-cookies.json
+          if [ -s "$COOKIE_FILE" ]; then cat "$COOKIE_FILE"; else echo "(no cookie file)"; fi
           echo "========================================================="

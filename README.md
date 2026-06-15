@@ -35,7 +35,7 @@ GitHub Actions 使用 **macOS** runner + **系统 Google Chrome**。
    ```
    SapphiraCaelum5932@outlook.com----rq757721
    ```
-5. 运行完成后在日志和 Artifacts 中查看 `cursor-cookies.json`
+5. 运行完成后在 **Job Summary**、日志和 Artifacts 中查看 `cursor-cookies.json`
 
 ### 2. 本地运行（macOS / Windows 推荐）
 
@@ -63,9 +63,11 @@ python login.py "邮箱----密码"
 2. 启动 Chrome（默认用 [patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright) 反检测内核），并注入 CapSolver 的 `turnstile.render` hook
 3. 打开 `https://authenticator.cursor.sh/` 输入邮箱
 4. 遇到 Cloudflare Turnstile 时由 [CapSolver](https://www.capsolver.com/) 自动求解（详见下文）
-5. 从 `https://www.xckj.site/easy-mailbox/frontend?email=...&password=...` 对应 API 轮询验证码
-6. 填入 6 位验证码完成登录
-7. 访问 `cursor.com` 并导出 cookie（Cookie-Editor JSON 格式）
+5. 点击发码**前**先记录基线（收件箱里最新一封 Cursor 登录邮件的时间），随后通过星辰邮箱大师接口
+   （`/easy-mailbox/emails` 列表 + `/easy-mailbox/email_detail` 详情）轮询验证码，**只接受 `date`
+   严格晚于基线的邮件**，避免误用收件箱里残留的旧验证码
+6. 自动把 6 位验证码逐位填入验证码框完成登录
+7. 访问 `cursor.com` 并导出 cookie（Cookie-Editor JSON 格式），同时打印到 GitHub Actions **Job Summary**
 
 > Cookie-Editor 扩展为可选项，默认关闭（`LOAD_COOKIE_EXTENSION=false`）；cookie 直接通过 Playwright 读取并导出，无需扩展。
 
