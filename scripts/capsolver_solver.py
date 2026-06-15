@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
-"""通过 CapSolver API 求解 Cloudflare Turnstile（项目唯一的过验证方式）。
+"""CapSolver 对接：求解 Cloudflare Turnstile（项目唯一的过验证方式）。
 
-工作流程：
-1. 在页面脚本执行前 hook ``window.turnstile.render``，捕获每个 widget 的
-   ``sitekey / action / cData`` 以及 ``callback``。Cursor/WorkOS 用的是**隐形 Turnstile**
-   （没有可见复选框，也没有 data-sitekey 节点），只能从 render 参数里拿到 sitekey；
-2. 调 CapSolver ``createTask``（AntiTurnstileTaskProxyLess）+ 轮询 ``getTaskResult`` 拿 token；
-3. 把 token 写回页面的 cf-turnstile-response 字段，并触发被 hook 捕获的 turnstile 回调，
-   让宿主页面继续后续登录流程。
+严格按官方文档实现：https://docs.capsolver.com/en/guide/captcha/cloudflare_turnstile/
 
-仅在设置了环境变量 ``CAPSOLVER_API_KEY`` 时启用。所有步骤都打印 ``[capsolver]`` 前缀日志，
-方便在 CI 日志里确认对接是否正常。
-文档参考: https://docs.capsolver.com/
+求解三步（全部对应官方 API）：
+1. ``getBalance`` 校验 API Key / 余额；
+2. ``createTask``（type=``AntiTurnstileTaskProxyLess``，必填 ``websiteURL`` / ``websiteKey``，
+   可选 ``metadata.action`` / ``metadata.cdata``，分别对应 Turnstile 元素的
+   ``data-action`` / ``data-cdata``）；
+3. 轮询 ``getTaskResult`` 直到 ``status == "ready"``，从 ``solution.token`` 取回 token。
+
+拿到 token 后写回页面（Cursor/WorkOS 用的是**隐形 Turnstile**，没有可见复选框）：
+- 注入到所有 ``cf-turnstile-response`` 字段（含 Shadow DOM）；
+- 触发提前 hook 到的 ``turnstile.render`` 回调，模拟真实校验通过。
+
+仅在设置了 ``CAPSOLVER_API_KEY`` 时启用，所有步骤打印 ``[capsolver]`` 前缀日志。
 """
 
 from __future__ import annotations
@@ -24,10 +27,9 @@ import requests
 
 CAPSOLVER_API_BASE = os.environ.get("CAPSOLVER_API_BASE", "https://api.capsolver.com").rstrip("/")
 
-# 在宿主页面提前 hook window.turnstile.render：
-#  - 记录每个 widget 的 sitekey/action/cData（隐形 Turnstile 唯一能拿到 sitekey 的途径）；
+# 在页面脚本执行前 hook window.turnstile.render：
+#  - 记录每个 widget 的 sitekey / action / cdata（隐形 Turnstile 唯一能拿到 sitekey 的途径）；
 #  - 记录 callback，拿到 token 后像真实校验通过那样回调宿主页面。
-# 必须在页面脚本执行前注入（add_init_script）。
 TURNSTILE_HOOK_SCRIPT = """
 (() => {
   if (window.__cfHookInstalled) return;
@@ -49,9 +51,9 @@ TURNSTILE_HOOK_SCRIPT = """
   };
   const patch = () => {
     if (!window.turnstile || window.__cfRenderPatched) return;
+    if (typeof window.turnstile.render !== 'function') return;
     window.__cfRenderPatched = true;
     const origRender = window.turnstile.render;
-    if (typeof origRender !== 'function') return;
     window.turnstile.render = function (container, params) {
       record(params);
       return origRender.apply(this, arguments);
@@ -63,34 +65,54 @@ TURNSTILE_HOOK_SCRIPT = """
 })();
 """
 
-# 拿到 token 后注入页面：写回所有 response 字段并逐个调用被 hook 捕获的回调。
+# 拿到 token 后注入页面：穿透 Shadow DOM 写回所有 response 字段，并逐个调用 hook 到的回调。
 TURNSTILE_INJECT_SCRIPT = """
 (token) => {
-  let fieldCount = 0;
-  let cbCount = 0;
-  const fields = document.querySelectorAll(
-    'input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"],' +
-    '#cf-turnstile-response,' +
-    'input[name="g-recaptcha-response"], textarea[name="g-recaptcha-response"]'
-  );
-  fields.forEach((el) => {
-    el.value = token;
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-    el.dispatchEvent(new Event('change', { bubbles: true }));
-    fieldCount += 1;
-  });
-  try {
-    const cbs = window.__cfTurnstileCallbacks || [];
-    cbs.forEach((cb) => {
-      try { cb(token); cbCount += 1; } catch (e) {}
+  const sel = 'input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"],'
+            + '#cf-turnstile-response,'
+            + 'input[name="g-recaptcha-response"], textarea[name="g-recaptcha-response"]';
+  let fields = 0;
+  const visit = (root) => {
+    if (!root || !root.querySelectorAll) return;
+    root.querySelectorAll(sel).forEach((el) => {
+      el.value = token;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      fields += 1;
     });
-  } catch (e) {}
-  return { fields: fieldCount, callbacks: cbCount };
+    root.querySelectorAll('*').forEach((el) => { if (el.shadowRoot) visit(el.shadowRoot); });
+  };
+  visit(document);
+  let callbacks = 0;
+  (window.__cfTurnstileCallbacks || []).forEach((cb) => {
+    try { cb(token); callbacks += 1; } catch (e) {}
+  });
+  return { fields, callbacks };
 }
 """
 
-# 读取 hook 捕获到的 render 参数（隐形 Turnstile 的 sitekey 来源）。
+# 读取 hook 捕获的 render 参数（隐形 Turnstile 的 sitekey 来源）。
 READ_PARAMS_SCRIPT = "() => (window.__cfTurnstileParams || [])"
+
+# 穿透 Shadow DOM 找 .cf-turnstile / [data-sitekey]（拿 sitekey + action + cdata）。
+DETECT_DOM_SCRIPT = """
+() => {
+  const out = [];
+  const visit = (root) => {
+    if (!root || !root.querySelectorAll) return;
+    root.querySelectorAll('.cf-turnstile, [data-sitekey]').forEach((el) => {
+      out.push({
+        sitekey: el.getAttribute('data-sitekey') || '',
+        action: el.getAttribute('data-action') || '',
+        cdata: el.getAttribute('data-cdata') || '',
+      });
+    });
+    root.querySelectorAll('*').forEach((el) => { if (el.shadowRoot) visit(el.shadowRoot); });
+  };
+  visit(document);
+  return out.find((x) => x.sitekey) || null;
+}
+"""
 
 _SITEKEY_RE = re.compile(r"0x[0-9A-Za-z_-]{20,}")
 
@@ -115,12 +137,14 @@ def _api_key() -> str:
     return key
 
 
-def log_account() -> None:
-    """启动时调用 getBalance 验证 API Key 是否有效、余额是否充足。
+def _post(endpoint: str, payload: dict, timeout: int = 30) -> dict:
+    resp = requests.post(f"{CAPSOLVER_API_BASE}/{endpoint}", json=payload, timeout=timeout)
+    resp.raise_for_status()
+    return resp.json()
 
-    这是确认 CapSolver “对接好没有” 的最快方式：
-    Key 无效会直接报错，余额为 0 也会在日志里看到。
-    """
+
+def log_account() -> None:
+    """启动时调用 getBalance 校验 API Key 是否有效、余额是否充足。"""
     if not is_enabled():
         _log("[capsolver] ⚠️ 未配置 CAPSOLVER_API_KEY，CapSolver 已禁用（无法过 Turnstile）")
         return
@@ -128,25 +152,17 @@ def log_account() -> None:
     masked = f"{key[:6]}...{key[-4:]}" if len(key) > 12 else "***"
     _log(f"[capsolver] API Key 已配置 ({masked})，base={CAPSOLVER_API_BASE}")
     try:
-        resp = requests.post(
-            f"{CAPSOLVER_API_BASE}/getBalance",
-            json={"clientKey": key},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        data = resp.json()
+        data = _post("getBalance", {"clientKey": key})
     except Exception as exc:  # noqa: BLE001
         _log(f"[capsolver] ❌ getBalance 请求失败（API 对接异常）: {exc}")
         return
     if data.get("errorId"):
-        _log(
-            f"[capsolver] ❌ API Key 无效: {data.get('errorCode')} "
-            f"{data.get('errorDescription')}"
-        )
+        _log(f"[capsolver] ❌ API Key 无效: {data.get('errorCode')} {data.get('errorDescription')}")
         return
-    balance = data.get("balance")
-    packages = data.get("packages") or []
-    _log(f"[capsolver] ✅ API Key 有效，账户余额=${balance} packages={len(packages)}")
+    _log(
+        f"[capsolver] ✅ API Key 有效，账户余额=${data.get('balance')} "
+        f"packages={len(data.get('packages') or [])}"
+    )
 
 
 def install_hook(target) -> None:
@@ -158,37 +174,11 @@ def install_hook(target) -> None:
         _log(f"[capsolver] ❌ 注入 hook 脚本失败: {exc}")
 
 
-def _read_hook_params(frame) -> dict | None:
-    """从 render hook 捕获的参数里取 sitekey（隐形 Turnstile）。"""
+def _eval(frame, script, *args):
     try:
-        params_list = frame.evaluate(READ_PARAMS_SCRIPT) or []
+        return frame.evaluate(script, *args)
     except Exception:
         return None
-    for params in params_list:
-        if params and params.get("sitekey"):
-            return params
-    return None
-
-
-def _detect_from_dom(frame) -> dict | None:
-    js = """
-    () => {
-      const el = document.querySelector('.cf-turnstile, [data-sitekey]');
-      if (!el) return null;
-      return {
-        sitekey: el.getAttribute('data-sitekey') || '',
-        action: el.getAttribute('data-action') || '',
-        cdata: el.getAttribute('data-cdata') || '',
-      };
-    }
-    """
-    try:
-        res = frame.evaluate(js)
-    except Exception:
-        return None
-    if res and res.get("sitekey"):
-        return res
-    return None
 
 
 def detect_turnstile(page) -> dict | None:
@@ -196,21 +186,21 @@ def detect_turnstile(page) -> dict | None:
     frames = [page.main_frame, *page.frames]
     _log(f"[capsolver] 检测 Turnstile：扫描 {len(frames)} 个 frame...")
 
-    # 1) render hook 捕获的参数（隐形 Turnstile 首选）
+    # 1) render hook 捕获的参数（隐形 Turnstile 首选，能拿到 action/cdata）
     for frame in frames:
-        params = _read_hook_params(frame)
-        if params:
-            params["url"] = page.url
-            _log(
-                f"[capsolver] ✅ 从 render hook 捕获 sitekey={params['sitekey']} "
-                f"action={params.get('action') or '无'} cdata={params.get('cdata') or '无'}"
-            )
-            return params
+        for params in _eval(frame, READ_PARAMS_SCRIPT) or []:
+            if params and params.get("sitekey"):
+                params["url"] = page.url
+                _log(
+                    f"[capsolver] ✅ 从 render hook 捕获 sitekey={params['sitekey']} "
+                    f"action={params.get('action') or '无'} cdata={params.get('cdata') or '无'}"
+                )
+                return params
 
-    # 2) DOM 上的 data-sitekey
+    # 2) DOM（含 Shadow DOM）上的 data-sitekey
     for frame in frames:
-        params = _detect_from_dom(frame)
-        if params:
+        params = _eval(frame, DETECT_DOM_SCRIPT)
+        if params and params.get("sitekey"):
             params["url"] = page.url
             _log(
                 f"[capsolver] ✅ 从 DOM 检测到 sitekey={params['sitekey']} "
@@ -226,14 +216,13 @@ def detect_turnstile(page) -> dict | None:
         _log(f"[capsolver] 发现 Cloudflare challenge iframe: {url[:120]}")
         match = _SITEKEY_RE.search(url)
         if match:
-            sitekey = match.group(0)
-            _log(f"[capsolver] ✅ 从 iframe URL 解析到 sitekey={sitekey}")
-            return {"sitekey": sitekey, "url": page.url, "action": "", "cdata": ""}
+            _log(f"[capsolver] ✅ 从 iframe URL 解析到 sitekey={match.group(0)}")
+            return {"sitekey": match.group(0), "url": page.url, "action": "", "cdata": ""}
 
     # 4) 环境变量兜底（手动指定 Cursor 的 Turnstile sitekey）
     override = os.environ.get("CAPSOLVER_SITEKEY", "").strip()
     if override:
-        _log(f"[capsolver] ✅ 使用 CAPSOLVER_SITEKEY 环境变量指定的 sitekey={override}")
+        _log(f"[capsolver] ✅ 使用 CAPSOLVER_SITEKEY 指定的 sitekey={override}")
         return {"sitekey": override, "url": page.url, "action": "", "cdata": ""}
 
     _log("[capsolver] ⚠️ 未在任何 frame 检测到 Turnstile sitekey")
@@ -249,7 +238,10 @@ def solve_turnstile(
     poll_timeout: int = 120,
     poll_interval: float = 3.0,
 ) -> str:
-    """调用 CapSolver 求解 Turnstile，返回 token。全过程打印日志。"""
+    """createTask + 轮询 getTaskResult，返回 Turnstile token。
+
+    参数与官方 AntiTurnstileTaskProxyLess 一一对应；轮询按文档 status（ready/processing/idle）处理。
+    """
     key = _api_key()
 
     task: dict = {
@@ -257,11 +249,7 @@ def solve_turnstile(
         "websiteURL": website_url,
         "websiteKey": sitekey,
     }
-    metadata: dict = {}
-    if action:
-        metadata["action"] = action
-    if cdata:
-        metadata["cdata"] = cdata
+    metadata = {k: v for k, v in (("action", action), ("cdata", cdata)) if v}
     if metadata:
         task["metadata"] = metadata
 
@@ -269,36 +257,23 @@ def solve_turnstile(
         f"[capsolver] → createTask sitekey={sitekey} url={website_url} "
         f"metadata={metadata or '无'}"
     )
-    resp = requests.post(
-        f"{CAPSOLVER_API_BASE}/createTask",
-        json={"clientKey": key, "task": task},
-        timeout=30,
-    )
-    resp.raise_for_status()
-    data = resp.json()
+    data = _post("createTask", {"clientKey": key, "task": task})
     if data.get("errorId"):
         raise CapSolverError(
             f"createTask 失败: {data.get('errorCode')} {data.get('errorDescription')}"
         )
-
     task_id = data.get("taskId")
     if not task_id:
         raise CapSolverError(f"createTask 未返回 taskId: {data}")
     _log(f"[capsolver] ← createTask 成功 taskId={task_id}，开始轮询结果...")
 
-    deadline = time.time() + poll_timeout
     start = time.time()
+    deadline = start + poll_timeout
     polls = 0
     while time.time() < deadline:
         time.sleep(poll_interval)
         polls += 1
-        result = requests.post(
-            f"{CAPSOLVER_API_BASE}/getTaskResult",
-            json={"clientKey": key, "taskId": task_id},
-            timeout=30,
-        )
-        result.raise_for_status()
-        payload = result.json()
+        payload = _post("getTaskResult", {"clientKey": key, "taskId": task_id})
         if payload.get("errorId"):
             raise CapSolverError(
                 f"getTaskResult 失败: {payload.get('errorCode')} {payload.get('errorDescription')}"
@@ -321,53 +296,23 @@ def solve_turnstile(
 
 
 def inject_token(page, token: str) -> bool:
-    """把 token 写回页面并触发回调，返回是否成功应用。"""
+    """把 token 写回页面（穿透 Shadow DOM）并触发回调，返回是否成功应用。"""
     total_fields = 0
     total_cbs = 0
     for frame in [page.main_frame, *page.frames]:
-        try:
-            res = frame.evaluate(TURNSTILE_INJECT_SCRIPT, token)
-        except Exception:
-            continue
+        res = _eval(frame, TURNSTILE_INJECT_SCRIPT, token)
         if res:
             total_fields += res.get("fields", 0)
             total_cbs += res.get("callbacks", 0)
-    applied = (total_fields + total_cbs) > 0
-    if applied:
+    if total_fields or total_cbs:
         _log(f"[capsolver] token 已注入：写入 {total_fields} 个字段，触发 {total_cbs} 个回调")
-    else:
-        _log("[capsolver] ❌ 未找到可注入的 response 字段/回调（token 无处可用）")
-    return applied
-
-
-def solve_on_page(page, *, label: str = "", poll_timeout: int = 120) -> bool:
-    """检测页面 Turnstile 并用 CapSolver 求解、注入。整体成功返回 True。"""
-    prefix = f"{label}" if label else ""
-    if not is_enabled():
-        _log(f"[capsolver] {prefix}⚠️ 未配置 CAPSOLVER_API_KEY，跳过求解")
-        return False
-
-    params = detect_turnstile(page)
-    if not params:
-        return False
-
-    try:
-        token = solve_turnstile(
-            params["sitekey"],
-            params["url"],
-            action=params.get("action", ""),
-            cdata=params.get("cdata", ""),
-            poll_timeout=poll_timeout,
-        )
-    except (CapSolverError, requests.RequestException) as exc:
-        _log(f"[capsolver] {prefix}❌ 求解失败: {exc}")
-        return False
-
-    return inject_token(page, token)
+        return True
+    _log("[capsolver] ❌ 未找到可注入的 response 字段/回调（token 无处可用）")
+    return False
 
 
 def solve_when_present(page, *, label: str = "", wait_s: int = 8) -> bool:
-    """在 wait_s 秒内轮询等待 Turnstile 出现（隐形 widget 渲染有延迟），出现即求解。
+    """在 wait_s 秒内轮询等待 Turnstile 出现（隐形 widget 渲染有延迟），出现即求解并注入。
 
     返回是否成功注入 token。未检测到 Turnstile 返回 False（不算错误）。
     """
