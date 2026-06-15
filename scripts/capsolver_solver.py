@@ -30,38 +30,73 @@ CAPSOLVER_API_BASE = os.environ.get("CAPSOLVER_API_BASE", "https://api.capsolver
 # 在页面脚本执行前 hook window.turnstile.render：
 #  - 记录每个 widget 的 sitekey / action / cdata（隐形 Turnstile 唯一能拿到 sitekey 的途径）；
 #  - 记录 callback，拿到 token 后像真实校验通过那样回调宿主页面。
+#
+# 关键：用 Object.defineProperty 拦截 window.turnstile 的「赋值动作」，
+# 站点（Cloudflare api.js）一赋值，setter 当场把 .render 包好——彻底消除
+# 「轮询打补丁抢不过站点同步调用 render()」的竞态（这正是之前 callback 从未被
+# 捕获、token 无处注入的根因）。defineProperty 失败时再退回轮询。
 TURNSTILE_HOOK_SCRIPT = """
 (() => {
   if (window.__cfHookInstalled) return;
   window.__cfHookInstalled = true;
   window.__cfTurnstileCallbacks = window.__cfTurnstileCallbacks || [];
   window.__cfTurnstileParams = window.__cfTurnstileParams || [];
-  const record = (params) => {
+
+  const record = (container, params) => {
     try {
       if (!params) return;
+      let cb = (typeof params.callback === 'function') ? params.callback : null;
+      // 隐形 widget 常用容器上的 data-callback 指定回调名，这里一并解析。
+      if (!cb && container) {
+        let el = null;
+        try {
+          el = (typeof container === 'string') ? document.querySelector(container) : container;
+        } catch (e) {}
+        const name = el && el.getAttribute && el.getAttribute('data-callback');
+        if (name && typeof window[name] === 'function') cb = window[name];
+      }
       window.__cfTurnstileParams.push({
         sitekey: params.sitekey || params.siteKey || '',
         action: params.action || '',
         cdata: params.cData || params.cdata || '',
       });
-      if (typeof params.callback === 'function') {
-        window.__cfTurnstileCallbacks.push(params.callback);
-      }
+      if (cb) window.__cfTurnstileCallbacks.push(cb);
     } catch (e) {}
   };
-  const patch = () => {
-    if (!window.turnstile || window.__cfRenderPatched) return;
-    if (typeof window.turnstile.render !== 'function') return;
-    window.__cfRenderPatched = true;
-    const origRender = window.turnstile.render;
-    window.turnstile.render = function (container, params) {
-      record(params);
-      return origRender.apply(this, arguments);
-    };
+
+  // 把某个 turnstile 对象的 render 方法包起来（幂等）。
+  const wrap = (ts) => {
+    try {
+      if (!ts || ts.__cfRenderPatched) return ts;
+      if (typeof ts.render === 'function') {
+        const origRender = ts.render;
+        ts.render = function (container, params) {
+          record(container, params);
+          return origRender.apply(this, arguments);
+        };
+        ts.__cfRenderPatched = true;
+      }
+    } catch (e) {}
+    return ts;
   };
-  patch();
-  const timer = setInterval(patch, 50);
-  setTimeout(() => clearInterval(timer), 60000);
+
+  let _ts = window.turnstile;
+  if (_ts) wrap(_ts);
+  try {
+    Object.defineProperty(window, 'turnstile', {
+      configurable: true,
+      get() { return _ts; },
+      set(v) { _ts = wrap(v); },
+    });
+  } catch (e) {
+    // 极少数环境 defineProperty 失败：退回高频轮询兜底。
+    const timer = setInterval(() => { if (window.turnstile) wrap(window.turnstile); }, 30);
+    setTimeout(() => clearInterval(timer), 60000);
+  }
+
+  // render 可能在对象赋值后才挂上（懒加载）：短时间内持续尝试补包，确保不漏。
+  const reWrap = setInterval(() => { if (_ts) wrap(_ts); }, 50);
+  setTimeout(() => clearInterval(reWrap), 60000);
 })();
 """
 
