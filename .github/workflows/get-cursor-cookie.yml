@@ -29,10 +29,6 @@ jobs:
         run: |
           "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --version
 
-      # cliclick 仅用于 human_mouse 的真人光标输入（填邮箱/点按钮），不再用于过 Turnstile
-      - name: Install cliclick
-        run: brew install cliclick
-
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
