@@ -29,6 +29,7 @@ jobs:
         run: |
           "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --version
 
+      # cliclick 仅用于 human_mouse 的真人光标输入（填邮箱/点按钮），不再用于过 Turnstile
       - name: Install cliclick
         run: brew install cliclick
 
@@ -54,8 +55,8 @@ jobs:
           LOAD_COOKIE_EXTENSION: "false"
           ACCOUNT_CREDENTIALS: ${{ inputs.account }}
           COOKIE_OUTPUT_FILE: cursor-cookies.json
-          # 在仓库 Settings > Secrets and variables > Actions 添加 CAPSOLVER_API_KEY；
-          # 未配置时自动回退到 cliclick 点击方案。
+          # 必填：在仓库 Settings > Secrets and variables > Actions 添加 CAPSOLVER_API_KEY。
+          # Turnstile 仅由 CapSolver 求解，未配置则无法通过验证。
           CAPSOLVER_API_KEY: ${{ secrets.CAPSOLVER_API_KEY }}
         run: |
           cd scripts

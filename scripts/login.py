@@ -50,8 +50,6 @@ from debug_utils import save_debug
 from io_utils import setup_utf8_stdio
 from mailbox import MailboxClient
 from turnstile_solver import (
-    click_turnstile_checkbox,
-    find_visible_turnstile,
     is_cloudflare_challenge,
     read_turnstile_token,
 )
@@ -243,8 +241,8 @@ def wait_for_page_ready(page: Page, timeout: int = 90) -> None:
             "cloudflare",
         )
         if any(marker in title or marker in body for marker in blocked_markers):
-            log("[login] 检测到 Cloudflare 验证，尝试自动处理...")
-            try_click_visible_turnstile(page, "页面加载 ")
+            log("[login] 检测到 Cloudflare 验证，尝试用 CapSolver 自动处理...")
+            try_solve_with_capsolver(page, "页面加载 ")
             page.wait_for_timeout(2000)
             continue
 
@@ -400,34 +398,41 @@ def click_continue_button(page: Page) -> bool:
 
 
 def try_solve_with_capsolver(page: Page, label: str = "") -> bool:
-    """若配置了 CapSolver，则用其求解 Turnstile 并注入 token；返回是否成功注入。"""
+    """用 CapSolver 求解页面上的 Turnstile 并注入 token；返回是否成功注入。
+
+    这是当前唯一的 Turnstile 通过方式（已移除 cliclick 点击方案）。
+    """
     if not capsolver_solver.is_enabled():
+        log(f"[login] {label}⚠️ 未配置 CAPSOLVER_API_KEY，跳过 CapSolver 求解")
         return False
-    log(f"[login] {label}使用 CapSolver 求解 Turnstile...")
+
+    params = capsolver_solver.detect_turnstile(page)
+    if not params:
+        log(f"[login] {label}页面未检测到 Turnstile，无需求解")
+        return False
+
+    log(
+        f"[login] {label}检测到 Turnstile(sitekey={params['sitekey']})，"
+        f"提交 CapSolver 求解（这一步会阻塞等待打码结果）..."
+    )
     try:
-        if capsolver_solver.solve_on_page(page):
-            log(f"[login] {label}CapSolver token 已注入，等待页面继续...")
-            page.wait_for_timeout(2000)
-            return True
+        token = capsolver_solver.solve_turnstile(
+            params["sitekey"],
+            params["url"],
+            action=params.get("action", ""),
+            cdata=params.get("cdata", ""),
+        )
     except Exception as exc:  # noqa: BLE001
-        log(f"[login] {label}CapSolver 求解异常: {exc}")
-    return False
+        log(f"[login] {label}❌ CapSolver 求解失败: {exc}")
+        return False
 
-
-def try_click_visible_turnstile(page: Page, label: str = "", rounds: int = 2) -> bool:
-    """通过 Turnstile：优先 CapSolver，其次人性化点击勾选；返回是否处理过。"""
-    if try_solve_with_capsolver(page, label):
+    if capsolver_solver.inject_token(page, token):
+        log(f"[login] {label}✅ CapSolver token 已注入页面，等待应用继续...")
+        page.wait_for_timeout(2000)
         return True
 
-    clicked = False
-    for _ in range(rounds):
-        if find_visible_turnstile(page) is None:
-            break
-        log(f"[login] {label}检测到可见 Turnstile，人性化点击勾选...")
-        click_turnstile_checkbox(page)
-        clicked = True
-        page.wait_for_timeout(2000)
-    return clicked
+    log(f"[login] {label}❌ token 注入失败（页面无 response 字段/回调）")
+    return False
 
 
 def is_on_code_input_page(page: Page) -> bool:
@@ -441,31 +446,28 @@ def safe_body_text(page: Page, timeout_ms: int = 1000) -> str:
         return ""
 
 
-def wait_for_turnstile_pass(page: Page, budget: int = 22, *, attempt: int = 1) -> bool:
-    """点击 Email sign-in code 后等待 managed Turnstile 自动通过。
+def wait_for_turnstile_pass(page: Page, budget: int = 45, *, attempt: int = 1) -> bool:
+    """点击 Email sign-in code 后用 CapSolver 通过 Turnstile，并确认进入下一步。
 
-    真人点击后通常几秒内放行。等待窗口内持续制造自然鼠标微动（hover_jitter），给
-    Turnstile 的行为采集喂真人 telemetry，并轮询成功/失败信号：
+    流程：CapSolver 求解并注入 token（阻塞）-> 轮询确认是否进入验证码页 / 离开 /password。
+    若注入后页面长时间不动，会在预算内重试一次 CapSolver（widget 可能被刷新重置）。
       成功：进入验证码页 / 离开 /password / 已发码提示
-      失败：出现 "can't verify the user is human" 文案
+      失败：出现 "can't verify the user is human" 文案 / 超时
     """
-    log(f"[login] 等待 Turnstile 通过（第 {attempt} 次，预算 {budget}s）...")
+    log(f"[login] 用 CapSolver 通过 Turnstile（第 {attempt} 次，预算 {budget}s）...")
 
-    # 优先用 CapSolver 求解；成功注入后通常会很快进入验证码页，下面的循环负责确认。
-    if try_solve_with_capsolver(page, "等待阶段 "):
-        if is_on_code_input_page(page) or not is_password_url(page):
-            log("[login] ✅ CapSolver 注入后已进入下一步")
-            return True
+    if not capsolver_solver.is_enabled():
+        log("[login] ❌ 未配置 CAPSOLVER_API_KEY，无法自动通过 Turnstile")
+        return False
 
-    if human_mouse.get_backend() == "os":
-        human_mouse.refresh_offset(page)
+    # 第一次求解并注入（阻塞等待打码结果）
+    try_solve_with_capsolver(page, "等待阶段 ")
+
     deadline = time.time() + budget
     start = time.time()
-    grace_before_click = 2.0  # 点复选框前先移动鼠标制造前置 telemetry（真人会先移到框上）
-    checkbox_clicked = False
     token_seen = False
-    widget_center: tuple[float, float] | None = None
     last_log = 0.0
+    last_resolve = time.time()  # 控制重试 CapSolver 的节流
 
     while time.time() < deadline:
         now = time.time()
@@ -481,7 +483,7 @@ def wait_for_turnstile_pass(page: Page, budget: int = 22, *, attempt: int = 1) -
         token = read_turnstile_token(page)
         if token and not token_seen:
             token_seen = True
-            log(f"[login] Turnstile token 已生成（len={len(token)}），等待应用跳转...")
+            log(f"[login] Turnstile token 已写入页面（len={len(token)}），等待应用跳转...")
 
         body = safe_body_text(page)
         if any(k in body for k in ("can't verify", "verify the user is human")):
@@ -491,34 +493,21 @@ def wait_for_turnstile_pass(page: Page, budget: int = 22, *, attempt: int = 1) -
             log(f"[login] ✅ 页面提示已发送验证码（{elapsed:.1f}s）")
             return True
 
-        if not checkbox_clicked:
-            found = find_visible_turnstile(page)
-            if found is not None:
-                widget_center = (found[0], found[1])
-                if elapsed >= grace_before_click:
-                    log(f"[login] 点击 Turnstile 复选框（{elapsed:.1f}s）@ ({found[0]:.0f},{found[1]:.0f})")
-                    try:
-                        human_mouse.human_click_xy(page, found[0], found[1], label="Turnstile 复选框")
-                    except Exception as exc:
-                        log(f"[login] 复选框点击失败: {exc}")
-                    checkbox_clicked = True
-                else:
-                    human_mouse.hover_jitter(page, around=widget_center, label="靠近复选框")
-            else:
-                human_mouse.hover_jitter(page, label="寻找复选框")
-        else:
-            # 点击后保持真人式微动，等待 Cloudflare 出 token / 跳转
-            human_mouse.hover_jitter(page, around=widget_center, label="等待校验")
+        # 注入后若 12s 仍无进展，重试一次 CapSolver（token 可能过期或 widget 已重置）
+        if now - last_resolve >= 12:
+            log(f"[login] {elapsed:.1f}s 仍无进展，重新调用 CapSolver 求解...")
+            try_solve_with_capsolver(page, f"重试({elapsed:.0f}s) ")
+            last_resolve = time.time()
 
         if now - last_log >= 3:
             log(
                 f"[login] 等待中... {elapsed:.1f}s/{budget}s "
-                f"token={'有' if token else '无'} clicked={checkbox_clicked} "
+                f"token={'有' if token else '无'} url={page.url} "
                 f"body={body.replace(chr(10), ' ')[:70]}"
             )
             last_log = now
 
-        page.wait_for_timeout(random.randint(200, 450))
+        page.wait_for_timeout(500)
 
     log(f"[login] ⏰ Turnstile 等待超时（{budget}s），仍在 /password")
     return False
@@ -536,7 +525,7 @@ def choose_email_code_login(page: Page) -> None:
     )
     if not on_password_page:
         if click_email_code_button(page):
-            wait_for_turnstile_pass(page, budget=22, attempt=1)
+            wait_for_turnstile_pass(page, budget=45, attempt=1)
             save_debug(page, "after-email-code-click")
         if is_on_code_input_page(page):
             return
@@ -555,7 +544,7 @@ def choose_email_code_login(page: Page) -> None:
                 "密码页未找到 Email sign-in code 按钮。请查看 debug/email-code-button-missing.png"
             )
         save_debug(page, f"after-email-code-click-{attempt}")
-        if wait_for_turnstile_pass(page, budget=22, attempt=attempt):
+        if wait_for_turnstile_pass(page, budget=45, attempt=attempt):
             log("[login] 已进入验证码流程")
             return
         log(f"[login] 第 {attempt}/{max_attempts} 次未通过 Turnstile")
@@ -607,9 +596,8 @@ def fill_email_and_submit(page: Page, email: str) -> None:
         save_debug(page, "continue-button-missing")
         raise TimeoutError("未找到 Continue 按钮")
 
-    # Continue 后可能立即出现 Cloudflare Turnstile（频繁尝试时尤甚）。用可信点击勾选，
-    # 不再用 cliclick（会劫持系统鼠标且不可靠）。
-    try_click_visible_turnstile(page, "Continue 后 ", rounds=3)
+    # Continue 后可能立即出现 Cloudflare Turnstile（频繁尝试时尤甚），用 CapSolver 求解。
+    try_solve_with_capsolver(page, "Continue 后 ")
 
     choose_email_code_login(page)
 
@@ -660,8 +648,8 @@ def wait_for_login_progress(
             log(f"[login] ({phase}) 页面提示已发送验证码，等待输入框渲染...")
 
         if is_cloudflare_challenge(snap["title"].lower(), body_lower):
-            log(f"[login] ({phase}) 提交后出现 Cloudflare，尝试可信点击勾选...")
-            try_click_visible_turnstile(page, f"({phase}) ")
+            log(f"[login] ({phase}) 提交后出现 Cloudflare，尝试用 CapSolver 求解...")
+            try_solve_with_capsolver(page, f"({phase}) ")
             page.wait_for_timeout(2000)
             continue
 

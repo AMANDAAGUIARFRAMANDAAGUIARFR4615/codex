@@ -85,19 +85,15 @@ python login.py "邮箱----密码"
 ]
 ```
 
-## Cloudflare 自动验证
+## Cloudflare 自动验证（CapSolver）
 
-Cursor 登录页有 Cloudflare Turnstile。脚本支持两种过验证方式：
-
-### 方式一：CapSolver 打码（推荐，配置后优先使用）
-
-接入 [CapSolver](https://www.capsolver.com/) 自动求解 Turnstile，成功率与稳定性更高，且不依赖 macOS：
+Cursor 登录页有 Cloudflare Turnstile。**Turnstile 一律由 [CapSolver](https://www.capsolver.com/) 求解**（原先的 cliclick 真人点击方案实测无效，已移除）：
 
 1. 用 Playwright 提取页面 Turnstile 的 `sitekey`
 2. 调 CapSolver `AntiTurnstileTaskProxyLess` 任务拿到 token
 3. 把 token 写回页面的 `cf-turnstile-response` 字段并触发 `turnstile.render` 回调
 
-启用方式：设置环境变量 `CAPSOLVER_API_KEY`（GitHub Actions 在仓库 **Settings → Secrets and variables → Actions** 中添加同名 secret）。
+启用方式：设置环境变量 `CAPSOLVER_API_KEY`（GitHub Actions 在仓库 **Settings → Secrets and variables → Actions** 中添加同名 secret）。**未配置则无法通过 Turnstile。**
 
 ```bash
 export CAPSOLVER_API_KEY="CAP-XXXXXXXX"
@@ -106,17 +102,9 @@ export CAPSOLVER_API_KEY="CAP-XXXXXXXX"
 可选环境变量：`CAPSOLVER_API_BASE`（默认 `https://api.capsolver.com`）。
 
 > 说明：CapSolver 走 proxyless 求解，token 由其服务器 IP 生成。多数内嵌 Turnstile widget 可直接通过；
-> 若 Cloudflare 对该站点做了强 IP 绑定导致偶发失败，脚本会自动回退到下方的点击方案。
+> 若 Cloudflare 对该站点做了强 IP 绑定，可改用 CapSolver 的 `AntiTurnstileTask`（带 proxy）。
 
-### 方式二：cliclick 真人点击（未配置 CapSolver 时回退）
-
-脚本在 **macOS** 上会：
-
-1. 用 Playwright 识别 Turnstile / iframe 在页面中的位置
-2. 换算为屏幕坐标
-3. 用 [cliclick](https://github.com/BlueM/cliclick) 模拟真实鼠标点击（系统级，非 DOM 点击）
-
-workflow 会自动 `brew install cliclick`。仅支持 macOS runner。
+> 注：`cliclick` 仍会安装，但仅用于 `human_mouse` 的真人光标输入（填邮箱/点按钮），与过 Turnstile 无关。
 
 ## 注意事项
 
