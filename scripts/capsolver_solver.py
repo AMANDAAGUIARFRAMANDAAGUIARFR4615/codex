@@ -284,6 +284,9 @@ def log_account() -> None:
 
 def install_hook(target) -> None:
     """在 BrowserContext 或 Page 上注入 turnstile.render hook（页面脚本执行前生效）。"""
+    if os.environ.get("CAPSOLVER_DISABLE_HOOK", "").lower() == "true":
+        _log("[capsolver] ⚠️ CAPSOLVER_DISABLE_HOOK=true，跳过 hook 注入（隔离测试用）")
+        return
     try:
         target.add_init_script(TURNSTILE_HOOK_SCRIPT)
         _log("[capsolver] 已注入 turnstile.render hook（捕获隐形 widget 的 sitekey/回调）")

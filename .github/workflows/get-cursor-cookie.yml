@@ -54,6 +54,8 @@ jobs:
           # 必填：在仓库 Settings > Secrets and variables > Actions 添加 CAPSOLVER_API_KEY。
           # Turnstile 仅由 CapSolver 求解，未配置则无法通过验证。
           CAPSOLVER_API_KEY: ${{ secrets.CAPSOLVER_API_KEY }}
+          # 临时隔离测试：关闭 turnstile hook，确认 window.turnstile 是否能正常加载。
+          CAPSOLVER_DISABLE_HOOK: "true"
         run: |
           cd scripts
           python -u login.py "$ACCOUNT_CREDENTIALS"
