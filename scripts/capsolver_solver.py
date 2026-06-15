@@ -204,6 +204,7 @@ DIAGNOSE_SCRIPT = """
     containerChildren: cont ? cont.childElementCount : -1,
     responseInput: q('input[name="cf-turnstile-response"]'),
     contentSitekey: m ? m[0] : '',
+    errors: (window.__cfErrors || []).slice(0, 12),
   };
 }
 """
@@ -282,8 +283,47 @@ def log_account() -> None:
     )
 
 
+# 始终注入：捕获页面 JS 错误（定位 Cloudflare api.js 是否在赋值 window.turnstile 前就抛错），
+# 并监听 cf-turnstile api.js 这个 <script> 的 load/error 事件，确认它到底有没有执行。
+ERROR_CAPTURE_SCRIPT = """
+(() => {
+  if (window.__cfErrInstalled) return;
+  window.__cfErrInstalled = true;
+  window.__cfErrors = [];
+  const push = (s) => { try { if (window.__cfErrors.length < 30) window.__cfErrors.push(String(s).slice(0,160)); } catch (e) {} };
+  window.addEventListener('error', (e) => {
+    if (e && e.target && e.target.tagName === 'SCRIPT') {
+      push('SCRIPT-ERROR ' + (e.target.src || '').slice(0,80));
+    } else {
+      push('ERR ' + (e && e.message || '') + ' @ ' + (e && e.filename || '').slice(0,60));
+    }
+  }, true);
+  window.addEventListener('unhandledrejection', (e) => {
+    push('REJ ' + ((e && e.reason && e.reason.message) || (e && e.reason) || ''));
+  });
+  // 监听 cf-turnstile api.js 脚本的真实 load/error 状态。
+  const watch = setInterval(() => {
+    try {
+      const s = document.getElementById('cf-turnstile-script')
+        || document.querySelector('script[src*="challenges.cloudflare.com"]');
+      if (s && !s.__cfWatched) {
+        s.__cfWatched = true;
+        s.addEventListener('load', () => push('CFSCRIPT-LOAD ok'));
+        s.addEventListener('error', () => push('CFSCRIPT-ERROR fail'));
+      }
+    } catch (e) {}
+  }, 50);
+  setTimeout(() => clearInterval(watch), 30000);
+})();
+"""
+
+
 def install_hook(target) -> None:
     """在 BrowserContext 或 Page 上注入 turnstile.render hook（页面脚本执行前生效）。"""
+    try:
+        target.add_init_script(ERROR_CAPTURE_SCRIPT)
+    except Exception:  # noqa: BLE001
+        pass
     if os.environ.get("CAPSOLVER_DISABLE_HOOK", "").lower() == "true":
         _log("[capsolver] ⚠️ CAPSOLVER_DISABLE_HOOK=true，跳过 hook 注入（隔离测试用）")
         return
@@ -316,7 +356,8 @@ def diagnose(page) -> None:
                 f"cb={info.get('cbCount')} container={info.get('containerPresent')}/"
                 f"children={info.get('containerChildren')} "
                 f"respInput={info.get('responseInput')} "
-                f"contentSitekey={info.get('contentSitekey') or '无'}"
+                f"contentSitekey={info.get('contentSitekey') or '无'} "
+                f"errors={info.get('errors') or '无'}"
             )
 
 
