@@ -310,6 +310,51 @@ def diagnose(page) -> None:
             )
 
 
+# 一次性网络探针：从页面所在源直接 fetch api.js，判断 challenges.cloudflare.com
+# 到底能不能通 / 返回了什么 / 是否被 CSP 拦执行。
+PROBE_APIJS_SCRIPT = """
+async () => {
+  const out = { csp: '' };
+  try {
+    const meta = document.querySelector('meta[http-equiv="Content-Security-Policy" i]');
+    out.csp = meta ? (meta.getAttribute('content') || '').slice(0, 200) : '';
+  } catch (e) {}
+  try {
+    const r = await fetch('https://challenges.cloudflare.com/turnstile/v0/api.js',
+                          { method: 'GET', cache: 'no-store' });
+    const t = await r.text();
+    out.status = r.status;
+    out.len = t.length;
+    out.head = t.slice(0, 60).replace(/\\n/g, ' ');
+  } catch (e) {
+    out.error = String(e);
+  }
+  return out;
+}
+"""
+
+_probed = False
+
+
+def probe_apijs(page) -> None:
+    """一次性：探测 Cloudflare api.js 是否可加载（仅在 turnstile 始终 undefined 时帮忙定位）。"""
+    global _probed
+    if _probed:
+        return
+    _probed = True
+    info = _eval(page.main_frame, PROBE_APIJS_SCRIPT)
+    if not info:
+        _log("[capsolver] 网络探针：执行失败（无返回）")
+        return
+    if info.get("error"):
+        _log(f"[capsolver] 网络探针：fetch api.js 失败 -> {info.get('error')} csp={info.get('csp') or '无'}")
+    else:
+        _log(
+            f"[capsolver] 网络探针：api.js status={info.get('status')} "
+            f"len={info.get('len')} head={info.get('head')!r} csp={info.get('csp') or '无'}"
+        )
+
+
 def kick_render(page) -> str:
     """主动触发页面渲染 Turnstile（让真正的 React 回调被 hook 捕获）。返回主 frame 结果。"""
     main_result = ""
@@ -473,6 +518,7 @@ def solve_when_present(page, *, label: str = "", wait_s: int = 8) -> bool:
         # 检测到 sitekey 但 widget 还没渲染（render=explicit 未触发）→ 主动 kick 一次，
         # 让页面真正调用 turnstile.render，从而把 React 回调注册进 hook，token 才有处可送。
         if not params and not kicked:
+            probe_apijs(page)
             result = kick_render(page)
             kicked = True
             if result and result != "already-rendered":

@@ -650,6 +650,30 @@ def export_cursor_cookies(context: BrowserContext, page: Page) -> str:
     return print_cookie_editor_export(cursor_cookies)
 
 
+def _install_network_logger(page: Page) -> None:
+    """记录 Cloudflare Turnstile 相关网络请求的状态，定位 api.js 是否真的加载。"""
+
+    def _is_cf(url: str) -> bool:
+        return "challenges.cloudflare.com" in url or "turnstile" in url
+
+    def on_response(resp) -> None:
+        try:
+            if _is_cf(resp.url):
+                log(f"[net] {resp.status} {resp.url[:110]}")
+        except Exception:
+            pass
+
+    def on_failed(request) -> None:
+        try:
+            if _is_cf(request.url):
+                log(f"[net] FAILED {request.failure} {request.url[:110]}")
+        except Exception:
+            pass
+
+    page.on("response", on_response)
+    page.on("requestfailed", on_failed)
+
+
 def _install_cancel_debug_handler(page: Page) -> None:
     def on_cancel(signum: int, _frame) -> None:
         label = "cancelled" if signum == signal.SIGTERM else "interrupted"
@@ -673,6 +697,7 @@ def run(credentials: str) -> str:
         log("[browser] Playwright 已初始化")
         browser, context = launch_browser(playwright)
         page = context.pages[0] if context.pages else context.new_page()
+        _install_network_logger(page)
         # 把默认超时压到 5s，避免页面跳转/跨域 iframe 未就绪时层层叠加 30s 超时。
         page.set_default_timeout(5000)
         log("[browser] 标签页已就绪（默认超时 5s）")
