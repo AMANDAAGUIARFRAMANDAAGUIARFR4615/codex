@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
@@ -39,7 +40,17 @@ CAPSOLVER_API_BASE = os.environ.get("CAPSOLVER_API_BASE", "https://api.capsolver
 # api.js 先把真实实现赋给 window.turnstile，再（setTimeout 0、并有 1s 重试）调用该 onload
 # 回调；我们在调用前把 turnstile.render 包好，于是页面 render() 一定被我们捕获——既不破坏
 # api.js 的加载，又能稳拿 sitekey 与真正的 React 回调。另加高频轮询兜底。
-TURNSTILE_HOOK_SCRIPT = """
+# 在「主世界(main world)」里安装的假 turnstile 实现。
+#
+# 为什么需要假实现：实测该 CI 浏览器里 Cloudflare 真实 api.js 加载后拒绝把实现挂到
+# window.turnstile（脚本 load 了但 window.turnstile 始终 undefined），widget 永不渲染、
+# onSuccess 回调永不注册、bot_detection_token 拿不到、验证码发不出。
+#
+# 由我们提供假 turnstile：react-turnstile 调 ready()/render() 时记录 sitekey 与它传入的
+# callback（把 token 写进 React 状态的 onSuccess）。随后 Python 用 CapSolver 求真实 token，
+# 再调用该 callback，页面拿到合法 token、渲染 <input name="bot_detection_token">、提交
+# server action 发码。真实 api.js 因 ("turnstile" in window) 自行 bail，互不影响。
+FAKE_TURNSTILE_JS = """
 (() => {
   if (window.__cfHookInstalled) return;
   window.__cfHookInstalled = true;
@@ -51,7 +62,6 @@ TURNSTILE_HOOK_SCRIPT = """
     try {
       if (!params) return;
       let cb = (typeof params.callback === 'function') ? params.callback : null;
-      // 隐形 widget 常用容器上的 data-callback 指定回调名，这里一并解析。
       if (!cb && container) {
         let el = null;
         try {
@@ -69,15 +79,6 @@ TURNSTILE_HOOK_SCRIPT = """
     } catch (e) {}
   };
 
-  // 关键：在该环境里 Cloudflare 的真实 api.js 检测到自动化后拒绝把实现挂到 window.turnstile
-  // （实测：脚本 load 了但 window.turnstile 始终 undefined），导致 widget 永不渲染、
-  // onSuccess 回调永不注册、bot_detection_token 拿不到、验证码发不出。
-  //
-  // 既然真实 turnstile 在浏览器内无论如何跑不起来，就由我们提供一个“假 turnstile”：
-  // react-turnstile 调 ready()/render() 时，我们记录 sitekey 与它传入的 callback（即把 token
-  // 写进 React 状态的 onSuccess）。随后 Python 用 CapSolver 求得真实 token，再调用该 callback，
-  // 页面就拿到合法 token、渲染出 <input name="bot_detection_token">、提交 server action 发码。
-  // 真实 api.js 因 ("turnstile" in window) 自行 bail，互不影响。
   let _wid = 0;
   const fake = {
     render: function (container, params) { record(container, params); return 'cf-fake-' + (++_wid); },
@@ -93,13 +94,39 @@ TURNSTILE_HOOK_SCRIPT = """
     Object.defineProperty(window, 'turnstile', {
       configurable: true,
       get() { return fake; },
-      set() { /* 忽略真实 api.js 的赋值，始终用我们的 fake */ },
+      set() {},
     });
   } catch (e) {
     try { window.turnstile = fake; } catch (e2) {}
   }
 })();
 """
+
+# 关键：patchright 的 add_init_script 跑在「隔离世界」，里头 set 的 window.turnstile 页面看不到。
+# 但「注入的 <script> 标签」一定在页面主世界执行——所以在隔离世界的 init script 里创建一个
+# <script>，把假 turnstile 代码塞进主世界，且在 document-start 最早时机生效。
+TURNSTILE_HOOK_SCRIPT = """
+(() => {
+  if (window.__cfBootstrapped) return;
+  window.__cfBootstrapped = true;
+  const SRC = %s;
+  const inject = () => {
+    try {
+      const root = document.documentElement || document.head || document.body;
+      if (!root) return false;
+      const s = document.createElement('script');
+      s.textContent = SRC;
+      root.appendChild(s);
+      s.remove();
+      return true;
+    } catch (e) { return false; }
+  };
+  if (!inject()) {
+    const t = setInterval(() => { if (inject()) clearInterval(t); }, 5);
+    setTimeout(() => clearInterval(t), 8000);
+  }
+})();
+""" % json.dumps(FAKE_TURNSTILE_JS)
 
 # 拿到 token 后注入页面：穿透 Shadow DOM 写回所有 response 字段，并逐个调用 hook 到的回调。
 # 关键：response 字段往往是 React 受控组件，直接 el.value= 不会更新 React 内部 state，
@@ -326,6 +353,16 @@ def _eval(frame, script, *args):
         return frame.evaluate(script, *args)
     except Exception:
         return None
+
+
+def ensure_fake_turnstile(page) -> None:
+    """在主世界安装假 turnstile（兜底：万一 init script 注入时机太早/失败）。
+
+    frame.evaluate 跑在主世界，且 FAKE_TURNSTILE_JS 自带 __cfHookInstalled 幂等，
+    重复调用无副作用。react-turnstile 会轮询/ready 等到 window.turnstile 出现再 render。
+    """
+    for frame in [page.main_frame, *page.frames]:
+        _eval(frame, FAKE_TURNSTILE_JS)
 
 
 def diagnose(page) -> None:
@@ -555,6 +592,7 @@ def solve_when_present(page, *, label: str = "", wait_s: int = 8) -> bool:
     kicked = False
     while time.time() < deadline:
         attempt += 1
+        ensure_fake_turnstile(page)
         params = detect_turnstile(page)
 
         # 检测到 sitekey 但 widget 还没渲染（render=explicit 未触发）→ 主动 kick 一次，
