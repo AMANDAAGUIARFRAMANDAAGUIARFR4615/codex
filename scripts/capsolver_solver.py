@@ -45,6 +45,7 @@ TURNSTILE_HOOK_SCRIPT = """
   window.__cfHookInstalled = true;
   window.__cfTurnstileCallbacks = window.__cfTurnstileCallbacks || [];
   window.__cfTurnstileParams = window.__cfTurnstileParams || [];
+  window.__cfToken = window.__cfToken || '';
 
   const record = (container, params) => {
     try {
@@ -68,51 +69,35 @@ TURNSTILE_HOOK_SCRIPT = """
     } catch (e) {}
   };
 
-  // 把某个 turnstile 对象的 render 方法包起来（幂等）。
-  const wrap = (ts) => {
-    try {
-      if (!ts || ts.__cfRenderPatched) return ts;
-      if (typeof ts.render === 'function') {
-        const origRender = ts.render;
-        ts.render = function (container, params) {
-          record(container, params);
-          return origRender.apply(this, arguments);
-        };
-        ts.__cfRenderPatched = true;
-      }
-    } catch (e) {}
-    return ts;
+  // 关键：在该环境里 Cloudflare 的真实 api.js 检测到自动化后拒绝把实现挂到 window.turnstile
+  // （实测：脚本 load 了但 window.turnstile 始终 undefined），导致 widget 永不渲染、
+  // onSuccess 回调永不注册、bot_detection_token 拿不到、验证码发不出。
+  //
+  // 既然真实 turnstile 在浏览器内无论如何跑不起来，就由我们提供一个“假 turnstile”：
+  // react-turnstile 调 ready()/render() 时，我们记录 sitekey 与它传入的 callback（即把 token
+  // 写进 React 状态的 onSuccess）。随后 Python 用 CapSolver 求得真实 token，再调用该 callback，
+  // 页面就拿到合法 token、渲染出 <input name="bot_detection_token">、提交 server action 发码。
+  // 真实 api.js 因 ("turnstile" in window) 自行 bail，互不影响。
+  let _wid = 0;
+  const fake = {
+    render: function (container, params) { record(container, params); return 'cf-fake-' + (++_wid); },
+    execute: function (container, params) { record(container, params); },
+    reset: function () {},
+    remove: function () {},
+    getResponse: function () { return window.__cfToken || ''; },
+    ready: function (cb) { try { if (typeof cb === 'function') cb(); } catch (e) {} },
+    isExpired: function () { return false; },
   };
 
-  // 拦截 onload 回调：调用前先把 render 包好（此时 window.turnstile 已被 api.js 真实赋值）。
-  const wrapOnload = (fn) => {
-    try {
-      if (typeof fn !== 'function' || fn.__cfWrapped) return fn;
-      const wrapped = function () {
-        try { if (window.turnstile) wrap(window.turnstile); } catch (e) {}
-        return fn.apply(this, arguments);
-      };
-      wrapped.__cfWrapped = true;
-      return wrapped;
-    } catch (e) { return fn; }
-  };
-
-  let _onload = window.onloadTurnstileCallback;
-  if (_onload) _onload = wrapOnload(_onload);
   try {
-    Object.defineProperty(window, 'onloadTurnstileCallback', {
+    Object.defineProperty(window, 'turnstile', {
       configurable: true,
-      get() { return _onload; },
-      set(v) { _onload = wrapOnload(v); },
+      get() { return fake; },
+      set() { /* 忽略真实 api.js 的赋值，始终用我们的 fake */ },
     });
-  } catch (e) {}
-
-  // 兜底：只读探测 window.turnstile（读操作不会让 "turnstile" in window 变真），
-  // 一旦出现就尽快包 render，覆盖非 onload 路径。
-  const timer = setInterval(() => {
-    try { if (window.turnstile) wrap(window.turnstile); } catch (e) {}
-  }, 10);
-  setTimeout(() => clearInterval(timer), 120000);
+  } catch (e) {
+    try { window.turnstile = fake; } catch (e2) {}
+  }
 })();
 """
 
@@ -121,9 +106,11 @@ TURNSTILE_HOOK_SCRIPT = """
 # 必须用原生 value setter 再派发 input 事件（React 的 onChange 才会读到新值）。
 TURNSTILE_INJECT_SCRIPT = """
 (token) => {
+  window.__cfToken = token;
   const sel = 'input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"],'
             + '#cf-turnstile-response,'
             + 'input[name="g-recaptcha-response"], textarea[name="g-recaptcha-response"],'
+            + 'input[name="bot_detection_token"],'
             + 'input[name*="turnstile" i], input[name*="captcha" i], input[name*="botcheck" i]';
   let fields = 0;
   const nativeSet = (el, val) => {
