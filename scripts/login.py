@@ -110,7 +110,13 @@ def get_extension_dir() -> Path | None:
 
 
 def _extra_browser_args() -> list[str]:
-    args: list[str] = []
+    # 放大窗口：runner 默认窗口仅 ~980x494，太小且不像真实桌面浏览器，是 Turnstile 风控
+    # 信号之一。固定位置 (0,0) 便于真实光标(cliclick)的视口->屏幕坐标换算。
+    win_size = os.environ.get("BROWSER_WINDOW_SIZE", "1280,1024")
+    args: list[str] = [
+        "--window-position=0,0",
+        f"--window-size={win_size}",
+    ]
     if sys.platform == "linux":
         args.extend(["--no-sandbox", "--disable-dev-shm-usage"])
     extension_dir = get_extension_dir()
@@ -419,10 +425,14 @@ def wait_for_turnstile_pass(page: Page, budget: int = 22, *, attempt: int = 1) -
       失败：出现 "can't verify the user is human" 文案
     """
     log(f"[login] 等待 Turnstile 通过（第 {attempt} 次，预算 {budget}s）...")
+    if human_mouse.get_backend() == "os":
+        human_mouse.refresh_offset(page)
     deadline = time.time() + budget
     start = time.time()
+    grace_before_click = 2.0  # 点复选框前先移动鼠标制造前置 telemetry（真人会先移到框上）
     checkbox_clicked = False
     token_seen = False
+    widget_center: tuple[float, float] | None = None
     last_log = 0.0
 
     while time.time() < deadline:
@@ -442,31 +452,41 @@ def wait_for_turnstile_pass(page: Page, budget: int = 22, *, attempt: int = 1) -
             log(f"[login] Turnstile token 已生成（len={len(token)}），等待应用跳转...")
 
         body = safe_body_text(page)
-        if any(k in body for k in ("can't verify", "verify the user is human", "verify you are human")):
+        if any(k in body for k in ("can't verify", "verify the user is human")):
             log(f"[login] ❌ Turnstile 校验失败提示（{elapsed:.1f}s）")
             return False
         if any(k in body for k in ("验证码", "verification code", "check your email", "enter the code")):
             log(f"[login] ✅ 页面提示已发送验证码（{elapsed:.1f}s）")
             return True
 
-        found = find_visible_turnstile(page)
-        if found is not None and not checkbox_clicked:
-            log(f"[login] 出现交互式 Turnstile 复选框（{elapsed:.1f}s），人性化点击...")
-            click_turnstile_checkbox(page)
-            checkbox_clicked = True
+        if not checkbox_clicked:
+            found = find_visible_turnstile(page)
+            if found is not None:
+                widget_center = (found[0], found[1])
+                if elapsed >= grace_before_click:
+                    log(f"[login] 点击 Turnstile 复选框（{elapsed:.1f}s）@ ({found[0]:.0f},{found[1]:.0f})")
+                    try:
+                        human_mouse.human_click_xy(page, found[0], found[1], label="Turnstile 复选框")
+                    except Exception as exc:
+                        log(f"[login] 复选框点击失败: {exc}")
+                    checkbox_clicked = True
+                else:
+                    human_mouse.hover_jitter(page, around=widget_center, label="靠近复选框")
+            else:
+                human_mouse.hover_jitter(page, label="寻找复选框")
         else:
-            # 真人等待时手会有细小移动，持续喂 telemetry
-            human_mouse.hover_jitter(page, label="等待校验")
+            # 点击后保持真人式微动，等待 Cloudflare 出 token / 跳转
+            human_mouse.hover_jitter(page, around=widget_center, label="等待校验")
 
         if now - last_log >= 3:
             log(
                 f"[login] 等待中... {elapsed:.1f}s/{budget}s "
-                f"token={'有' if token else '无'} checkbox={found is not None} "
+                f"token={'有' if token else '无'} clicked={checkbox_clicked} "
                 f"body={body.replace(chr(10), ' ')[:70]}"
             )
             last_log = now
 
-        page.wait_for_timeout(random.randint(250, 550))
+        page.wait_for_timeout(random.randint(200, 450))
 
     log(f"[login] ⏰ Turnstile 等待超时（{budget}s），仍在 /password")
     return False
@@ -493,7 +513,7 @@ def choose_email_code_login(page: Page) -> None:
         return
 
     log("[login] 进入密码页，准备点击 Email sign-in code 触发验证码")
-    max_attempts = 3
+    max_attempts = 2
     for attempt in range(1, max_attempts + 1):
         # 每次点击前预热鼠标，制造连续的真人轨迹 telemetry
         human_mouse.warm_up(page, label=f"点码前#{attempt}")
@@ -532,9 +552,19 @@ def abort_on_password_url(page: Page, phase: str) -> None:
     )
 
 
+def setup_human_mouse(page: Page) -> None:
+    """首屏就绪后：打印环境指纹、选择鼠标后端（默认真实光标 os）、计算坐标偏移。"""
+    human_mouse.log_environment(page)
+    backend = os.environ.get("HUMAN_MOUSE_BACKEND", "os")
+    human_mouse.set_backend(backend)
+    if human_mouse.get_backend() == "os":
+        human_mouse.refresh_offset(page)
+
+
 def fill_email_and_submit(page: Page, email: str) -> None:
     open_login_page(page)
     wait_for_page_ready(page)
+    setup_human_mouse(page)
 
     if not fill_email_field(page, email):
         save_debug(page, "email-input-missing")
