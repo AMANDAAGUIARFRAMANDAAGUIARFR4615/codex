@@ -43,6 +43,7 @@ except ImportError:
 
     _USING_PATCHRIGHT = False
 
+import capsolver_solver
 import human_mouse
 from cookie_export import print_cookie_editor_export
 from debug_utils import save_debug
@@ -166,6 +167,9 @@ def launch_browser(playwright) -> tuple[Browser | None, BrowserContext]:
 
         log(f"[browser] patchright 持久化上下文: {user_data_dir}")
         context = playwright.chromium.launch_persistent_context(**ctx_kwargs)
+        if capsolver_solver.is_enabled():
+            log("[browser] 检测到 CAPSOLVER_API_KEY，注入 Turnstile 回调 hook")
+            capsolver_solver.install_hook(context)
         log("[browser] BrowserContext 已创建")
         return None, context
 
@@ -186,6 +190,9 @@ def launch_browser(playwright) -> tuple[Browser | None, BrowserContext]:
         timezone_id="America/Los_Angeles",
     )
     context.add_init_script(STEALTH_SCRIPT)
+    if capsolver_solver.is_enabled():
+        log("[browser] 检测到 CAPSOLVER_API_KEY，注入 Turnstile 回调 hook")
+        capsolver_solver.install_hook(context)
     log("[browser] BrowserContext 已创建")
     return browser, context
 
@@ -392,8 +399,26 @@ def click_continue_button(page: Page) -> bool:
     return clicked
 
 
+def try_solve_with_capsolver(page: Page, label: str = "") -> bool:
+    """若配置了 CapSolver，则用其求解 Turnstile 并注入 token；返回是否成功注入。"""
+    if not capsolver_solver.is_enabled():
+        return False
+    log(f"[login] {label}使用 CapSolver 求解 Turnstile...")
+    try:
+        if capsolver_solver.solve_on_page(page):
+            log(f"[login] {label}CapSolver token 已注入，等待页面继续...")
+            page.wait_for_timeout(2000)
+            return True
+    except Exception as exc:  # noqa: BLE001
+        log(f"[login] {label}CapSolver 求解异常: {exc}")
+    return False
+
+
 def try_click_visible_turnstile(page: Page, label: str = "", rounds: int = 2) -> bool:
-    """出现可见 Turnstile 复选框时人性化点击勾选；返回是否点过。"""
+    """通过 Turnstile：优先 CapSolver，其次人性化点击勾选；返回是否处理过。"""
+    if try_solve_with_capsolver(page, label):
+        return True
+
     clicked = False
     for _ in range(rounds):
         if find_visible_turnstile(page) is None:
@@ -425,6 +450,13 @@ def wait_for_turnstile_pass(page: Page, budget: int = 22, *, attempt: int = 1) -
       失败：出现 "can't verify the user is human" 文案
     """
     log(f"[login] 等待 Turnstile 通过（第 {attempt} 次，预算 {budget}s）...")
+
+    # 优先用 CapSolver 求解；成功注入后通常会很快进入验证码页，下面的循环负责确认。
+    if try_solve_with_capsolver(page, "等待阶段 "):
+        if is_on_code_input_page(page) or not is_password_url(page):
+            log("[login] ✅ CapSolver 注入后已进入下一步")
+            return True
+
     if human_mouse.get_backend() == "os":
         human_mouse.refresh_offset(page)
     deadline = time.time() + budget

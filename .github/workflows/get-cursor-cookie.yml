@@ -54,6 +54,9 @@ jobs:
           LOAD_COOKIE_EXTENSION: "false"
           ACCOUNT_CREDENTIALS: ${{ inputs.account }}
           COOKIE_OUTPUT_FILE: cursor-cookies.json
+          # 在仓库 Settings > Secrets and variables > Actions 添加 CAPSOLVER_API_KEY；
+          # 未配置时自动回退到 cliclick 点击方案。
+          CAPSOLVER_API_KEY: ${{ secrets.CAPSOLVER_API_KEY }}
         run: |
           cd scripts
           python -u login.py "$ACCOUNT_CREDENTIALS"
