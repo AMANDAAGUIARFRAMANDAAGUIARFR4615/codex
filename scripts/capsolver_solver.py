@@ -101,16 +101,28 @@ TURNSTILE_HOOK_SCRIPT = """
 """
 
 # 拿到 token 后注入页面：穿透 Shadow DOM 写回所有 response 字段，并逐个调用 hook 到的回调。
+# 关键：response 字段往往是 React 受控组件，直接 el.value= 不会更新 React 内部 state，
+# 必须用原生 value setter 再派发 input 事件（React 的 onChange 才会读到新值）。
 TURNSTILE_INJECT_SCRIPT = """
 (token) => {
   const sel = 'input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"],'
             + '#cf-turnstile-response,'
-            + 'input[name="g-recaptcha-response"], textarea[name="g-recaptcha-response"]';
+            + 'input[name="g-recaptcha-response"], textarea[name="g-recaptcha-response"],'
+            + 'input[name*="turnstile" i], input[name*="captcha" i], input[name*="botcheck" i]';
   let fields = 0;
+  const nativeSet = (el, val) => {
+    try {
+      const proto = el.tagName === 'TEXTAREA'
+        ? window.HTMLTextAreaElement.prototype
+        : window.HTMLInputElement.prototype;
+      const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+      setter.call(el, val);
+    } catch (e) { el.value = val; }
+  };
   const visit = (root) => {
     if (!root || !root.querySelectorAll) return;
     root.querySelectorAll(sel).forEach((el) => {
-      el.value = token;
+      nativeSet(el, token);
       el.dispatchEvent(new Event('input', { bubbles: true }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
       fields += 1;
@@ -129,13 +141,15 @@ TURNSTILE_INJECT_SCRIPT = """
 # 读取 hook 捕获的 render 参数（隐形 Turnstile 的 sitekey 来源）。
 READ_PARAMS_SCRIPT = "() => (window.__cfTurnstileParams || [])"
 
-# 穿透 Shadow DOM 找 .cf-turnstile / [data-sitekey]（拿 sitekey + action + cdata）。
+# 穿透 Shadow DOM 找 .cf-turnstile / #cf-turnstile / [data-sitekey]（拿 sitekey + action + cdata）。
+# 兜底：Cursor/WorkOS 用 render=explicit，容器是 <div id="cf-turnstile"> 且无 data-sitekey，
+# sitekey 只存在于 React 注水数据里（siteKey:"0x4..."），所以再 regex 扫一遍整页 HTML。
 DETECT_DOM_SCRIPT = """
 () => {
   const out = [];
   const visit = (root) => {
     if (!root || !root.querySelectorAll) return;
-    root.querySelectorAll('.cf-turnstile, [data-sitekey]').forEach((el) => {
+    root.querySelectorAll('.cf-turnstile, #cf-turnstile, [data-sitekey]').forEach((el) => {
       out.push({
         sitekey: el.getAttribute('data-sitekey') || '',
         action: el.getAttribute('data-action') || '',
@@ -145,7 +159,68 @@ DETECT_DOM_SCRIPT = """
     root.querySelectorAll('*').forEach((el) => { if (el.shadowRoot) visit(el.shadowRoot); });
   };
   visit(document);
-  return out.find((x) => x.sitekey) || null;
+  let found = out.find((x) => x.sitekey) || null;
+  if (!found) {
+    const html = document.documentElement ? document.documentElement.outerHTML : '';
+    const m = html.match(/0x4AAAAAA[A-Za-z0-9_-]{6,}/);
+    if (m) found = { sitekey: m[0], action: '', cdata: '' };
+  }
+  return found;
+}
+"""
+
+# 诊断脚本：在 widget 检测失败时打印页面真实状态，定位“为什么没渲染/没捕获”。
+DIAGNOSE_SCRIPT = """
+() => {
+  const q = (s) => { try { return !!document.querySelector(s); } catch (e) { return false; } };
+  const cont = document.querySelector('#cf-turnstile, .cf-turnstile');
+  const html = document.documentElement ? document.documentElement.outerHTML : '';
+  const m = html.match(/0x4AAAAAA[A-Za-z0-9_-]{6,}/);
+  return {
+    hookInstalled: !!window.__cfHookInstalled,
+    turnstileType: typeof window.turnstile,
+    hasRender: !!(window.turnstile && typeof window.turnstile.render === 'function'),
+    onloadType: typeof window.onloadTurnstileCallback,
+    scriptPresent: q('#cf-turnstile-script') || q('script[src*="challenges.cloudflare.com"]'),
+    paramsCount: (window.__cfTurnstileParams || []).length,
+    cbCount: (window.__cfTurnstileCallbacks || []).length,
+    containerPresent: !!cont,
+    containerChildren: cont ? cont.childElementCount : -1,
+    responseInput: q('input[name="cf-turnstile-response"]'),
+    contentSitekey: m ? m[0] : '',
+  };
+}
+"""
+
+# 强制渲染：Cursor 页用 render=explicit + onload=onloadTurnstileCallback，自动浏览器里
+# onload 偶尔不触发，导致 turnstile.render 从未被调用（#cf-turnstile 容器空、无 callback）。
+# 主动调用 onloadTurnstileCallback() 让页面把真正的 React 回调注册进来（被我们的 hook 捕获）；
+# 若连 window.turnstile 都没有（api.js 没加载成功），就重新注入一次 api.js。
+KICK_RENDER_SCRIPT = """
+() => {
+  try {
+    const cont = document.querySelector('#cf-turnstile, .cf-turnstile');
+    const rendered = (window.__cfTurnstileParams || []).length > 0
+      || (cont && cont.childElementCount > 0);
+    if (rendered) return 'already-rendered';
+    if (typeof window.turnstile === 'undefined') {
+      if (!window.__cfReinjected) {
+        window.__cfReinjected = true;
+        const s = document.createElement('script');
+        s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js'
+              + '?onload=onloadTurnstileCallback&render=explicit';
+        s.async = true; s.defer = true;
+        (document.head || document.documentElement).appendChild(s);
+        return 'reinjected-apijs';
+      }
+      return 'turnstile-undefined';
+    }
+    if (typeof window.onloadTurnstileCallback === 'function') {
+      window.onloadTurnstileCallback();
+      return 'called-onload';
+    }
+    return 'no-onload-callback';
+  } catch (e) { return 'error:' + (e && e.message); }
 }
 """
 
@@ -216,6 +291,37 @@ def _eval(frame, script, *args):
         return None
 
 
+def diagnose(page) -> None:
+    """打印页面 Turnstile 真实状态，定位“widget 为何没渲染/没捕获”。"""
+    for idx, frame in enumerate([page.main_frame, *page.frames]):
+        info = _eval(frame, DIAGNOSE_SCRIPT)
+        if not info:
+            continue
+        # 只打印主文档及包含线索的子 frame，避免刷屏。
+        if idx == 0 or info.get("containerPresent") or info.get("contentSitekey"):
+            _log(
+                f"[capsolver] 诊断 frame#{idx}: turnstile={info.get('turnstileType')} "
+                f"render={info.get('hasRender')} onload={info.get('onloadType')} "
+                f"script={info.get('scriptPresent')} params={info.get('paramsCount')} "
+                f"cb={info.get('cbCount')} container={info.get('containerPresent')}/"
+                f"children={info.get('containerChildren')} "
+                f"respInput={info.get('responseInput')} "
+                f"contentSitekey={info.get('contentSitekey') or '无'}"
+            )
+
+
+def kick_render(page) -> str:
+    """主动触发页面渲染 Turnstile（让真正的 React 回调被 hook 捕获）。返回主 frame 结果。"""
+    main_result = ""
+    for idx, frame in enumerate([page.main_frame, *page.frames]):
+        result = _eval(frame, KICK_RENDER_SCRIPT)
+        if result and result not in ("already-rendered", "no-onload-callback"):
+            _log(f"[capsolver] kick frame#{idx}: {result}")
+        if idx == 0:
+            main_result = result or ""
+    return main_result
+
+
 def detect_turnstile(page) -> dict | None:
     """返回 {sitekey, url, action, cdata} 或 None，并打印检测过程。"""
     frames = [page.main_frame, *page.frames]
@@ -261,6 +367,7 @@ def detect_turnstile(page) -> dict | None:
         return {"sitekey": override, "url": page.url, "action": "", "cdata": ""}
 
     _log("[capsolver] ⚠️ 未在任何 frame 检测到 Turnstile sitekey")
+    diagnose(page)
     return None
 
 
@@ -358,11 +465,34 @@ def solve_when_present(page, *, label: str = "", wait_s: int = 8) -> bool:
 
     deadline = time.time() + wait_s
     attempt = 0
+    kicked = False
     while time.time() < deadline:
         attempt += 1
         params = detect_turnstile(page)
+
+        # 检测到 sitekey 但 widget 还没渲染（render=explicit 未触发）→ 主动 kick 一次，
+        # 让页面真正调用 turnstile.render，从而把 React 回调注册进 hook，token 才有处可送。
+        if not params and not kicked:
+            result = kick_render(page)
+            kicked = True
+            if result and result != "already-rendered":
+                _log(f"[capsolver] {prefix}尝试触发渲染: {result}，等待 widget 出现...")
+                try:
+                    page.wait_for_timeout(2500)
+                except Exception:
+                    time.sleep(2.5)
+                params = detect_turnstile(page)
+
         if params:
             _log(f"[capsolver] {prefix}检测到 Turnstile，开始求解（第 {attempt} 次检测命中）")
+            # 求解前确保 widget 已渲染（callback 已注册），否则 token 注入后无回调可触发。
+            if not kicked:
+                kick_render(page)
+                kicked = True
+                try:
+                    page.wait_for_timeout(1500)
+                except Exception:
+                    time.sleep(1.5)
             try:
                 token = solve_turnstile(
                     params["sitekey"],
