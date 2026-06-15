@@ -43,17 +43,16 @@ except ImportError:
 
     _USING_PATCHRIGHT = False
 
+import human_mouse
 from cookie_export import print_cookie_editor_export
 from debug_utils import save_debug
 from io_utils import setup_utf8_stdio
 from mailbox import MailboxClient
 from turnstile_solver import (
-    cliclick_at,
     click_turnstile_checkbox,
     find_visible_turnstile,
-    focus_chrome,
     is_cloudflare_challenge,
-    viewport_to_screen,
+    read_turnstile_token,
 )
 
 setup_utf8_stdio()
@@ -279,10 +278,18 @@ def fill_email_field(page: Page, email: str) -> bool:
     email_input = find_visible_locator(page, EMAIL_SELECTORS, timeout_ms=10000)
     if email_input is None:
         return False
-    email_input.click()
-    email_input.fill("")
-    email_input.fill(email)
-    page.wait_for_timeout(500)
+    # 拟真：先在页面上随机游走制造 telemetry，再点击输入框逐字符输入
+    human_mouse.warm_up(page, label="填邮箱前")
+    if not human_mouse.human_type(page, email_input, email, label="邮箱"):
+        # 退化方案
+        try:
+            email_input.click()
+            email_input.fill("")
+            email_input.fill(email)
+        except Exception as exc:
+            log(f"[login] 邮箱输入失败: {exc}")
+            return False
+    page.wait_for_timeout(random.randint(300, 600))
     return True
 
 
@@ -295,69 +302,13 @@ def _locators_for_label(frame: Frame, label: str) -> list[Locator]:
     ]
 
 
-def _click_strategies(page: Page, locator: Locator):
-    strategies = [
-        ("click", lambda: locator.click(timeout=8000)),
-        ("mouse", lambda: _mouse_click_locator(page, locator)),
-        ("js", lambda: locator.evaluate("el => el.click()", timeout=4000)),
-    ]
-    if sys.platform == "darwin":
-        strategies.append(("cliclick", lambda: _cliclick_locator(page, locator)))
-    return strategies
-
-
-def human_click_locator(page: Page, locator: Locator, *, label: str = "") -> bool:
-    """尽量模拟真实用户点击，避免 force click 导致 React 按钮无响应。"""
-    try:
-        locator.wait_for(state="visible", timeout=8000)
-        locator.scroll_into_view_if_needed()
-        page.wait_for_timeout(random.randint(200, 500))
-    except Exception:
-        return False
-
-    for name, action in _click_strategies(page, locator):
-        try:
-            action()
-            log(f"[login] 已点击 {label or '元素'} ({name})")
-            page.wait_for_timeout(random.randint(800, 1500))
-            return True
-        except Exception as exc:
-            log(f"[login] 点击失败 ({name}): {exc}")
-    return False
-
-
-def click_email_code_button(page: Page) -> bool:
-    label = "Email sign-in code"
-    for frame in iter_frames(page):
-        for loc in _locators_for_label(frame, label):
-            try:
-                if loc.count() == 0 or not loc.first.is_visible():
-                    continue
-                target = loc.first
-                target.wait_for(state="visible", timeout=8000)
-                target.scroll_into_view_if_needed()
-                page.wait_for_timeout(random.randint(200, 500))
-
-                for name, action in _click_strategies(page, target):
-                    try:
-                        action()
-                        log(f"[login] 已点击 {label} ({name})")
-                        page.wait_for_timeout(random.randint(800, 1500))
-                        # 只要有一种方式点击成功就立即返回：点击后按钮会变成
-                        # spinner，accessible name 不再是 "Email sign-in code"，
-                        # 继续尝试其它策略会对已消失的按钮 bounding_box/evaluate
-                        # 等待 30s 而白白超时。后续是否进入验证码页交给调用方等待。
-                        return True
-                    except Exception as exc:
-                        log(f"[login] 点击失败 ({name}): {exc}")
-            except Exception:
-                continue
-    log("[login] 未找到 Email sign-in code 按钮")
-    return False
+def _human_click(page: Page, locator: Locator, label: str) -> None:
+    if not human_mouse.human_click_locator(page, locator, label=label, timeout=6000):
+        raise RuntimeError("human mouse 点击未成功")
 
 
 def _mouse_click_locator(page: Page, locator: Locator) -> None:
-    box = locator.bounding_box(timeout=4000)
+    box = locator.bounding_box(timeout=3000)
     if not box:
         raise RuntimeError("无法获取元素坐标")
     x = box["x"] + box["width"] / 2
@@ -367,18 +318,53 @@ def _mouse_click_locator(page: Page, locator: Locator) -> None:
     page.mouse.click(x, y)
 
 
-def _cliclick_locator(page: Page, locator: Locator) -> None:
-    box = locator.bounding_box(timeout=4000)
-    if not box:
-        raise RuntimeError("无法获取元素坐标")
-    x = box["x"] + box["width"] / 2
-    y = box["y"] + box["height"] / 2
-    screen = viewport_to_screen(x, y)
-    if screen is None:
-        raise RuntimeError("无法换算屏幕坐标")
-    focus_chrome()
-    if not cliclick_at(*screen):
-        raise RuntimeError("cliclick 点击失败")
+def _click_strategies(page: Page, locator: Locator, *, label: str = ""):
+    """优先用人性化鼠标轨迹点击（给 Turnstile 喂真人 telemetry），失败再退化。"""
+    return [
+        ("human", lambda: _human_click(page, locator, label)),
+        ("click", lambda: locator.click(timeout=6000)),
+        ("mouse", lambda: _mouse_click_locator(page, locator)),
+        ("js", lambda: locator.evaluate("el => el.click()", timeout=4000)),
+    ]
+
+
+def click_locator_humanlike(page: Page, locator: Locator, *, label: str = "") -> bool:
+    try:
+        locator.wait_for(state="visible", timeout=6000)
+    except Exception as exc:
+        log(f"[login] {label or '元素'} 不可见: {exc}")
+        return False
+
+    for name, action in _click_strategies(page, locator, label=label):
+        try:
+            action()
+            log(f"[login] 已点击 {label or '元素'} (策略={name})")
+            page.wait_for_timeout(random.randint(500, 1000))
+            return True
+        except Exception as exc:
+            log(f"[login] 点击失败 (策略={name}): {exc}")
+    return False
+
+
+# 兼容旧调用名
+human_click_locator = click_locator_humanlike
+
+
+def click_email_code_button(page: Page) -> bool:
+    label = "Email sign-in code"
+    for frame in iter_frames(page):
+        for loc in _locators_for_label(frame, label):
+            try:
+                if loc.count() == 0 or not loc.first.is_visible():
+                    continue
+                # 点击后按钮会变成 spinner（accessible name 改变），首次点击成功即返回，
+                # 后续是否进入验证码页交给调用方等待。
+                if click_locator_humanlike(page, loc.first, label=label):
+                    return True
+            except Exception:
+                continue
+    log("[login] 未找到 Email sign-in code 按钮")
+    return False
 
 
 def click_button_by_label(page: Page, label: str) -> bool:
@@ -386,7 +372,7 @@ def click_button_by_label(page: Page, label: str) -> bool:
         for loc in _locators_for_label(frame, label):
             try:
                 if loc.count() > 0 and loc.first.is_visible():
-                    if human_click_locator(page, loc.first, label=label):
+                    if click_locator_humanlike(page, loc.first, label=label):
                         return True
             except Exception:
                 continue
@@ -401,15 +387,15 @@ def click_continue_button(page: Page) -> bool:
 
 
 def try_click_visible_turnstile(page: Page, label: str = "", rounds: int = 2) -> bool:
-    """出现可见 Turnstile 复选框时用可信点击勾选（不劫持系统鼠标）；返回是否点过。"""
+    """出现可见 Turnstile 复选框时人性化点击勾选；返回是否点过。"""
     clicked = False
     for _ in range(rounds):
         if find_visible_turnstile(page) is None:
             break
-        log(f"[login] {label}检测到 Turnstile，可信点击勾选...")
+        log(f"[login] {label}检测到可见 Turnstile，人性化点击勾选...")
         click_turnstile_checkbox(page)
         clicked = True
-        page.wait_for_timeout(3000)
+        page.wait_for_timeout(2000)
     return clicked
 
 
@@ -417,72 +403,78 @@ def is_on_code_input_page(page: Page) -> bool:
     return page.locator('[data-index="0"]').count() > 0
 
 
-def wait_for_code_flow(page: Page, timeout: int = 12, *, attempt: int = 1) -> bool:
-    """点击 Email sign-in code 后等待验证码页或离开 /password；必要时勾选可见的 Turnstile。"""
-    log(f"[login] 等待验证码流程（第 {attempt} 次，最多 {timeout} 秒）...")
-    deadline = time.time() + timeout
-    turnstile_clicked_at: float | None = None
-    post_turnstile_grace = 8
-    last_log = 0.0
+def safe_body_text(page: Page, timeout_ms: int = 1000) -> str:
+    try:
+        return page.locator("body").inner_text(timeout=timeout_ms).lower()
+    except Exception:
+        return ""
+
+
+def wait_for_turnstile_pass(page: Page, budget: int = 22, *, attempt: int = 1) -> bool:
+    """点击 Email sign-in code 后等待 managed Turnstile 自动通过。
+
+    真人点击后通常几秒内放行。等待窗口内持续制造自然鼠标微动（hover_jitter），给
+    Turnstile 的行为采集喂真人 telemetry，并轮询成功/失败信号：
+      成功：进入验证码页 / 离开 /password / 已发码提示
+      失败：出现 "can't verify the user is human" 文案
+    """
+    log(f"[login] 等待 Turnstile 通过（第 {attempt} 次，预算 {budget}s）...")
+    deadline = time.time() + budget
     start = time.time()
+    checkbox_clicked = False
+    token_seen = False
+    last_log = 0.0
 
     while time.time() < deadline:
         now = time.time()
-        remaining = int(deadline - now)
+        elapsed = now - start
 
         if is_on_code_input_page(page):
-            log(f"[login] 验证码输入框已出现（{int(now - start)}s）")
+            log(f"[login] ✅ 验证码输入框已出现（{elapsed:.1f}s）")
             return True
         if not is_password_url(page):
-            log(f"[login] 已离开密码页（{int(now - start)}s）: {page.url}")
+            log(f"[login] ✅ 已离开 /password（{elapsed:.1f}s）: {page.url}")
             return True
 
-        # Turnstile 勾选后若超过 grace 秒仍无跳转，立即放弃本次等待并重试。
-        if turnstile_clicked_at is not None and now - turnstile_clicked_at > post_turnstile_grace:
-            log(f"[login] Turnstile 勾选后 {post_turnstile_grace}s 无跳转，放弃本次等待")
-            return False
+        token = read_turnstile_token(page)
+        if token and not token_seen:
+            token_seen = True
+            log(f"[login] Turnstile token 已生成（len={len(token)}），等待应用跳转...")
 
-        # 仅首次出现可见复选框时点击一次，避免重复点击导致更长等待。
-        if turnstile_clicked_at is None and find_visible_turnstile(page) is not None:
-            log("[login] 出现可见 Turnstile 复选框，尝试可信点击勾选...")
-            click_turnstile_checkbox(page)
-            turnstile_clicked_at = now
-            page.wait_for_timeout(1500)
-            continue
-
-        body = ""
-        try:
-            body = page.locator("body").inner_text(timeout=1000).lower()
-        except Exception:
-            pass
-        if "can't verify" in body or "verify the user is human" in body:
-            log("[login] Turnstile 校验失败（Can't verify the user is human）")
+        body = safe_body_text(page)
+        if any(k in body for k in ("can't verify", "verify the user is human", "verify you are human")):
+            log(f"[login] ❌ Turnstile 校验失败提示（{elapsed:.1f}s）")
             return False
-        # 注意: 不能用 "sign-in code" 判定，因为密码页的按钮文案就是 "Email sign-in code"，
-        # 会导致点击前就误判为已进入验证码流程。
         if any(k in body for k in ("验证码", "verification code", "check your email", "enter the code")):
-            log(f"[login] 页面提示已发送验证码（{int(now - start)}s）")
+            log(f"[login] ✅ 页面提示已发送验证码（{elapsed:.1f}s）")
             return True
+
+        found = find_visible_turnstile(page)
+        if found is not None and not checkbox_clicked:
+            log(f"[login] 出现交互式 Turnstile 复选框（{elapsed:.1f}s），人性化点击...")
+            click_turnstile_checkbox(page)
+            checkbox_clicked = True
+        else:
+            # 真人等待时手会有细小移动，持续喂 telemetry
+            human_mouse.hover_jitter(page, label="等待校验")
 
         if now - last_log >= 3:
-            has_turnstile = turnstile_clicked_at is None and find_visible_turnstile(page) is not None
-            preview = body.replace("\n", " ")[:80] if body else ""
             log(
-                f"[login] 等待中... 剩余 {remaining}s "
-                f"password={is_password_url(page)} turnstile={has_turnstile} "
-                f"body={preview}"
+                f"[login] 等待中... {elapsed:.1f}s/{budget}s "
+                f"token={'有' if token else '无'} checkbox={found is not None} "
+                f"body={body.replace(chr(10), ' ')[:70]}"
             )
             last_log = now
 
-        page.wait_for_timeout(500)
+        page.wait_for_timeout(random.randint(250, 550))
 
-    log(f"[login] 等待验证码流程超时（{timeout}s），仍在 /password")
+    log(f"[login] ⏰ Turnstile 等待超时（{budget}s），仍在 /password")
     return False
 
 
 def choose_email_code_login(page: Page) -> None:
-    """Submit email 后若仍在密码页，切换到验证码登录。"""
-    page.wait_for_timeout(1000)
+    """Submit email 后通过 Email sign-in code 的 Turnstile，进入验证码输入页。"""
+    page.wait_for_timeout(800)
 
     if is_on_code_input_page(page):
         return
@@ -490,41 +482,44 @@ def choose_email_code_login(page: Page) -> None:
     on_password_page = is_password_url(page) or find_visible_locator(
         page, ['input[type="password"]'], timeout_ms=1500
     )
-    if on_password_page:
-        log("[login] 进入密码页，点击 Email sign-in code")
-        # Cloudflare 交互式 Turnstile 失败时会显示 "Can't verify the user is human"
-        # 并把内联复选框移除、退回表单，需要重新点击 Email sign-in code 再来一次。
-        max_attempts = 2
-        for attempt in range(1, max_attempts + 1):
-            if not click_email_code_button(page):
-                save_debug(page, "email-code-button-missing")
-                raise TimeoutError(
-                    "密码页未找到 Email sign-in code 按钮。"
-                    "请查看 debug/email-code-button-missing.png"
-                )
-            save_debug(page, f"after-email-code-click-{attempt}")
-            if wait_for_code_flow(page, timeout=12, attempt=attempt):
-                log("[login] 已进入验证码流程")
-                return
-            log(f"[login] 第 {attempt}/{max_attempts} 次未进入验证码流程，准备重试...")
-            page.wait_for_timeout(random.randint(800, 1500))
-
-        save_debug(page, "still-on-password-after-code-click")
-        raise TimeoutError(
-            "多次点击 Email sign-in code 后仍停留在 /password 页面（Cloudflare 交互式 "
-            "Turnstile 校验失败）。请查看 debug/still-on-password-after-code-click.png"
-        )
-
-    if click_email_code_button(page):
-        wait_for_code_flow(page, timeout=10, attempt=1)
-        save_debug(page, "after-email-code-click")
+    if not on_password_page:
+        if click_email_code_button(page):
+            wait_for_turnstile_pass(page, budget=22, attempt=1)
+            save_debug(page, "after-email-code-click")
+        if is_on_code_input_page(page):
+            return
+        save_debug(page, "no-code-flow-after-submit")
+        log("[login] 提交邮箱后未进入验证码流程，继续等待验证码输入框...")
         return
 
-    if is_on_code_input_page(page):
-        return
+    log("[login] 进入密码页，准备点击 Email sign-in code 触发验证码")
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        # 每次点击前预热鼠标，制造连续的真人轨迹 telemetry
+        human_mouse.warm_up(page, label=f"点码前#{attempt}")
+        if not click_email_code_button(page):
+            save_debug(page, "email-code-button-missing")
+            raise TimeoutError(
+                "密码页未找到 Email sign-in code 按钮。请查看 debug/email-code-button-missing.png"
+            )
+        save_debug(page, f"after-email-code-click-{attempt}")
+        if wait_for_turnstile_pass(page, budget=22, attempt=attempt):
+            log("[login] 已进入验证码流程")
+            return
+        log(f"[login] 第 {attempt}/{max_attempts} 次未通过 Turnstile")
+        if attempt < max_attempts:
+            log("[login] 刷新页面重置 Turnstile 后重试...")
+            try:
+                page.reload(wait_until="domcontentloaded", timeout=60000)
+                page.wait_for_timeout(random.randint(1200, 2200))
+            except Exception as exc:
+                log(f"[login] 刷新失败: {exc}")
 
-    save_debug(page, "no-code-flow-after-submit")
-    log("[login] 提交邮箱后未进入验证码流程，继续等待验证码输入框...")
+    save_debug(page, "still-on-password-after-code-click")
+    raise TimeoutError(
+        "多次点击 Email sign-in code 后仍停留在 /password（Turnstile 未通过）。"
+        "请查看 debug/still-on-password-after-code-click.png"
+    )
 
 
 def abort_on_password_url(page: Page, phase: str) -> None:
@@ -721,7 +716,10 @@ def run(credentials: str) -> str:
         browser, context = launch_browser(playwright)
         # 持久化上下文启动时已自带一个空白页，直接复用，避免多出一个空标签。
         page = context.pages[0] if context.pages else context.new_page()
-        log("[browser] 标签页已就绪")
+        # 关键：把默认超时压到 5s。否则页面跳转/跨域 iframe 未就绪时，bounding_box /
+        # inner_text 等默认 30s 超时层层叠加，单次探测就能阻塞数分钟（实测吃掉整个预算）。
+        page.set_default_timeout(5000)
+        log("[browser] 标签页已就绪（默认超时 5s）")
         _install_cancel_debug_handler(page)
 
         try:

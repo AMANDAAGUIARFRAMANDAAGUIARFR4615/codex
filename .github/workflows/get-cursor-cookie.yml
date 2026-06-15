@@ -22,6 +22,8 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
 
       - name: Verify system Google Chrome
         run: |
@@ -43,6 +45,7 @@ jobs:
           echo "COOKIE_EDITOR_DIR=$GITHUB_WORKSPACE/extensions/cookie-editor" >> "$GITHUB_ENV"
 
       - name: Login Cursor and export cookies
+        timeout-minutes: 6
         env:
           PYTHONUNBUFFERED: "1"
           PYTHONIOENCODING: utf-8

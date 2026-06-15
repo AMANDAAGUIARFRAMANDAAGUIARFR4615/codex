@@ -8,6 +8,7 @@ import subprocess
 import sys
 import time
 
+import human_mouse
 from debug_utils import save_debug
 from io_utils import setup_utf8_stdio
 
@@ -49,12 +50,19 @@ _TURNSTILE_SELECTORS = [
 ]
 
 
+# 所有探测用的 bounding_box 都使用很短的超时，避免页面跳转/跨域 iframe 未就绪时
+# 默认 30s 超时层层叠加，导致单次探测阻塞数分钟（实测会吃掉整个等待预算）。
+_PROBE_TIMEOUT_MS = 1200
+
+
 def _candidate_boxes(page) -> list[dict]:
     """收集所有可能是 Turnstile 组件的视口包围盒。
 
     Turnstile 的可见复选框常位于跨域/影子 iframe 内，page.frames 与序列化 HTML 都不一定
     可靠（尤其在 patchright 隔离环境下），因此综合多种来源：frame 列表、选择器命中的
     容器/iframe、以及兜底的所有 iframe。
+
+    注意：每个 bounding_box 都带短超时（_PROBE_TIMEOUT_MS），否则一次探测可能阻塞数分钟。
     """
     boxes: list[dict] = []
 
@@ -62,7 +70,8 @@ def _candidate_boxes(page) -> list[dict]:
         url = (fr.url or "").lower()
         if "challenges.cloudflare.com" in url or "turnstile" in url:
             try:
-                box = fr.frame_element().bounding_box()
+                handle = fr.frame_element()
+                box = handle.bounding_box()
                 if box:
                     boxes.append(box)
             except Exception:
@@ -76,7 +85,7 @@ def _candidate_boxes(page) -> list[dict]:
             count = 0
         for i in range(count):
             try:
-                box = locator.nth(i).bounding_box()
+                box = locator.nth(i).bounding_box(timeout=_PROBE_TIMEOUT_MS)
                 if box:
                     boxes.append(box)
             except Exception:
@@ -94,6 +103,24 @@ def _candidate_boxes(page) -> list[dict]:
         pass
 
     return boxes
+
+
+def read_turnstile_token(page) -> str:
+    """读取 Turnstile 校验通过后写入的 cf-turnstile-response token（非空即已通过）。"""
+    js = (
+        "() => {"
+        " const names=['cf-turnstile-response','g-recaptcha-response'];"
+        " for (const n of names){"
+        "  const el=document.querySelector(`[name=\"${n}\"]`)"
+        "    || document.querySelector(`#${n}`);"
+        "  if (el && el.value) return el.value;"
+        " }"
+        " return ''; }"
+    )
+    try:
+        return page.evaluate(js) or ""
+    except Exception:
+        return ""
 
 
 def find_visible_turnstile(page):
@@ -138,10 +165,11 @@ def find_visible_turnstile(page):
 
 
 def click_turnstile_checkbox(page) -> bool:
-    """用 page.mouse 在视口坐标处发可信点击勾选 Turnstile 复选框。
+    """用人性化轨迹 + CDP 可信事件勾选可见的 Turnstile 复选框。
 
-    page.mouse.click 经 CDP 派发，事件 isTrusted=true；按视口坐标点击会被浏览器路由进
-    跨域/影子 iframe，命中其中的复选框，且与屏幕分辨率无关。
+    page.mouse 经 CDP 派发，事件 isTrusted=true；按视口坐标点击会被浏览器路由进跨域/影子
+    iframe 命中复选框，且与屏幕分辨率无关。这里复用 human_mouse 的贝塞尔轨迹，使交互式
+    校验的鼠标 telemetry 看起来像真人。
     """
     found = find_visible_turnstile(page)
     if found is None:
@@ -149,21 +177,9 @@ def click_turnstile_checkbox(page) -> bool:
         return False
 
     cx, cy, box = found
-    _log(f"[turnstile] 发现可见 Turnstile: {box}")
+    _log(f"[turnstile] 发现可见 Turnstile: {box} -> 点击 ({cx:.0f},{cy:.0f})")
     try:
-        # 人性化轨迹：先移动到组件附近，再分步带抖动地靠近复选框，最后点击。
-        # Turnstile 交互式校验会分析鼠标轨迹/节奏，瞬移点击更易被判为机器人。
-        page.mouse.move(box["x"] - 40, box["y"] - 30, steps=8)
-        page.wait_for_timeout(random.randint(120, 280))
-        for _ in range(3):
-            jx = cx + random.uniform(-3, 3)
-            jy = cy + random.uniform(-3, 3)
-            page.mouse.move(jx, jy, steps=random.randint(6, 14))
-            page.wait_for_timeout(random.randint(60, 160))
-        page.mouse.move(cx, cy, steps=random.randint(4, 8))
-        page.wait_for_timeout(random.randint(180, 420))
-        page.mouse.click(cx, cy, delay=random.randint(40, 110))
-        _log(f"[turnstile] 已可信点击复选框 (视口坐标 x={cx:.0f}, y={cy:.0f})")
+        human_mouse.human_click_xy(page, cx, cy, label="Turnstile 复选框")
         return True
     except Exception as exc:
         _log(f"[turnstile] 点击失败: {exc}")
