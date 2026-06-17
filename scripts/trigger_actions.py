@@ -135,11 +135,19 @@ def main() -> None:
     print(f"Run {run['id']}: {run['html_url']}")
 
     host, port = frp_endpoint()
-    print("\n登录约需 2-3 分钟。就绪后在你的控制台运行（流式实时输出）：")
-    print(f'  curl -N "http://{host}:{port}/ask?q=你的问题"')
-    print(f'  curl -N "http://{host}:{port}/new"      # 开启新对话（清空上下文）')
-    print(f'  curl    "http://{host}:{port}/health"   # 健康检查')
-    print(f"\n查看运行日志/排错: python {Path(__file__).name} --logs")
+    base = f"http://{host}:{port}/v1"
+    print("\n登录约需 2-3 分钟。就绪后在客户端配置：")
+    print(f"  Base URL : {base}")
+    print("  Model    : claude")
+    print("  API Key  : sk-local  （任意；若设 SERVE_API_KEY 则填相同值）")
+    print("\nOpenAI Python SDK 示例：")
+    print("  from openai import OpenAI")
+    print(f"  client = OpenAI(base_url='{base}', api_key='sk-local')")
+    print("  stream = client.chat.completions.create(")
+    print("      model='claude', messages=[{'role':'user','content':'你好'}], stream=True)")
+    print("  for c in stream: print(c.choices[0].delta.content or '', end='', flush=True)")
+    print(f"\n健康检查: curl {base.replace('/v1', '')}/health")
+    print(f"查看运行日志/排错: python {Path(__file__).name} --logs")
 
 
 if __name__ == "__main__":
