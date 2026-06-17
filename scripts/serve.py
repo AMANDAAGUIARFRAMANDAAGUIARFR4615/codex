@@ -356,8 +356,6 @@ def main() -> None:
 
     with L.sync_playwright() as playwright:
         browser, context = L.launch_browser(playwright)
-        # 在任何导航前注入 completion 网络抓取 hook（回答从原始 SSE 读取，不抓 DOM）。
-        claude_ask.install_capture(context)
         page = context.pages[0] if context.pages else context.new_page()
         page.set_default_timeout(5000)
         try:
