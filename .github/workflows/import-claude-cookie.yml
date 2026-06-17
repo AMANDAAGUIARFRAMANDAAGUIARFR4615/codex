@@ -25,14 +25,13 @@ jobs:
           cache: pip
           cache-dependency-path: requirements.txt
 
-      - name: Verify system Google Chrome
-        run: |
-          "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --version
-
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+
+      - name: Install patchright Chromium
+        run: patchright install chromium
 
       - name: Download Cookie-Editor extension
         env:
@@ -46,7 +45,6 @@ jobs:
         env:
           PYTHONUNBUFFERED: "1"
           PYTHONIOENCODING: utf-8
-          PLAYWRIGHT_CHANNEL: chrome
           PLAYWRIGHT_HEADLESS: "false"
           LOAD_COOKIE_EXTENSION: "true"
           COOKIE_INPUT_FILE: ${{ inputs.cookie_file }}

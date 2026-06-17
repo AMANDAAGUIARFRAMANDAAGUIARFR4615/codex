@@ -90,16 +90,29 @@ def _extra_browser_args() -> list[str]:
     return args
 
 
+def resolve_browser_channel() -> str | None:
+    """加载未打包扩展必须用 Chromium；系统 Google Chrome 会忽略 --load-extension。"""
+    configured = os.environ.get("PLAYWRIGHT_CHANNEL", "").strip().lower()
+    if get_extension_dir() is not None:
+        if configured and configured not in ("chromium", ""):
+            log(
+                "[browser] 已加载 Cookie-Editor，强制使用 patchright Chromium "
+                f"(忽略 PLAYWRIGHT_CHANNEL={configured})"
+            )
+        return None
+    if configured:
+        return None if configured == "chromium" else configured
+    return "chrome" if sys.platform in ("darwin", "win32") else None
+
+
 def launch_browser(playwright) -> tuple[Browser | None, BrowserContext]:
-    channel = os.environ.get(
-        "PLAYWRIGHT_CHANNEL",
-        "chrome" if sys.platform in ("darwin", "win32") else "chromium",
-    )
+    channel = resolve_browser_channel()
     use_headless = os.environ.get("PLAYWRIGHT_HEADLESS", "false").lower() == "true"
     extra_args = _extra_browser_args()
+    channel_label = channel or "chromium"
 
     log(
-        f"[browser] 启动浏览器 (platform={sys.platform}, channel={channel}, "
+        f"[browser] 启动浏览器 (platform={sys.platform}, channel={channel_label}, "
         f"headless={use_headless}, patchright={_USING_PATCHRIGHT})..."
     )
 

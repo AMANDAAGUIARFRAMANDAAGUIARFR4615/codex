@@ -12,9 +12,9 @@
 
 ## 运行环境
 
-GitHub Actions 使用 **macOS** runner + **系统 Google Chrome**。
+GitHub Actions 使用 **macOS** runner + **patchright Chromium**（系统 Google Chrome 不支持加载未打包扩展）。
 
-本地 macOS / Windows 推荐直接使用系统 Chrome；Linux 回退 Playwright Chromium。
+本地 macOS / Windows 加载 Cookie-Editor 时同样应使用 patchright Chromium；未加载扩展时仍可用系统 Chrome。
 
 ## 使用方式
 
@@ -30,8 +30,8 @@ GitHub Actions 使用 **macOS** runner + **系统 Google Chrome**。
 
 ```bash
 pip install -r requirements.txt
+patchright install chromium
 python scripts/install_extension.py extensions/cookie-editor
-export PLAYWRIGHT_CHANNEL=chrome
 export LOAD_COOKIE_EXTENSION=true
 export COOKIE_EDITOR_DIR="$PWD/extensions/cookie-editor"
 export CAPSOLVER_API_KEY="CAP-XXXXXXXX"
