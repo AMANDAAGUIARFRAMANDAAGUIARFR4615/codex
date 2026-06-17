@@ -127,14 +127,16 @@ def build_tool_preamble(tools: list[dict[str, Any]], tool_choice: Any = None) ->
     Agent 客户端（如 Cursor）自己的 system prompt 已包含任务说明，这里只补协议层。
     """
     lines = [
-        "To use a tool, output one or more blocks in EXACTLY this raw-text format",
-        "(not inside code fences, nothing else around them):",
+        "To act on the user's machine you MUST call the tools listed below. Output each tool call",
+        "as RAW TEXT in EXACTLY this format — never inside code fences, artifacts, or markdown,",
+        "and with nothing else around it:",
         '<tool_call>{"name": "<tool_name>", "arguments": {<json-args>}}</tool_call>',
         "",
         "- `arguments` must be valid JSON matching the tool's parameters.",
-        "- When calling tools, reply with only the <tool_call> block(s).",
+        "- Do NOT use any built-in code-execution, analysis, or artifact feature: that sandbox is",
+        "  NOT the user's machine, so its results are wrong. Only the tools below act on the real project.",
+        "- When calling tools, reply with only the <tool_call> block(s) and no other text.",
         "- After tool results come back, either call more tools or write the final plain-text answer.",
-        "- Use the tools to inspect the real project; do not answer from a sandbox of your own.",
         "",
         "Available tools:",
     ]

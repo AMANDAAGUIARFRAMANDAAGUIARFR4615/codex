@@ -132,6 +132,9 @@ class Handler(BaseHTTPRequestHandler):
             if not self._check_auth():
                 return
             self._json(200, OAI.models_payload())
+        elif route.path in ("/v1/debug/last", "/debug/last"):
+            # 在线排查：返回最近一次提问发出的问题 + claude.ai 返回的原始 SSE / 解析结果。
+            self._json(200, claude_ask.get_last_debug())
         else:
             self._json(404, OAI.error_payload("Not found", err_type="invalid_request_error", code="not_found"))
 

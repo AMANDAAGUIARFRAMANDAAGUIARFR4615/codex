@@ -361,13 +361,25 @@ def _fallback_answer(page, org_uuid: str, on_delta, timeout: int) -> str:
         page.wait_for_timeout(2000)
     if last:
         on_delta(last)
+    _save_debug_text("last_answer.txt", last)
+    # 保留前面网络抓取记录的 raw_sse，仅更新兜底得到的文本/来源。
+    _LAST_DEBUG.update(
+        source=f"fallback:{source or '无'}", text=last, text_len=len(last), done=True
+    )
     log(f"[claude] 兜底回答来源={source or '无'}，长度={len(last)} 字")
     return last
 
 
 # ---------------------------------------------------------------------------
-# 日志
+# 日志 + 最近一次请求的调试快照（供 /v1/debug/last 在线查看）
 # ---------------------------------------------------------------------------
+
+_LAST_DEBUG: dict = {}
+
+
+def get_last_debug() -> dict:
+    """返回最近一次提问的调试快照（发送的问题 + 返回的原始 SSE / 解析结果）。"""
+    return dict(_LAST_DEBUG)
 
 
 def _save_debug_text(name: str, text: str) -> None:
@@ -386,17 +398,26 @@ def _preview(text: str, limit: int = _PREVIEW) -> str:
 def log_outgoing(prompt: str) -> None:
     """打印 + 落盘「发送给 claude.ai 的问题」，方便排查。"""
     _save_debug_text("last_prompt.txt", prompt)
+    _LAST_DEBUG.clear()
+    _LAST_DEBUG.update(ts=time.time(), prompt=prompt, prompt_len=len(prompt))
     log(f"[claude] ▶ 发送问题（{len(prompt)} 字）: {_preview(prompt)}")
 
 
-def _log_incoming(raw: str, text: str, thinking: str, stop: str, status: int, done: bool) -> None:
+def _log_incoming(
+    raw: str, text: str, thinking: str, stop: str, status: int, done: bool, source: str = "network"
+) -> None:
     """打印 + 落盘「claude.ai 返回的原始/解析数据」。"""
     _save_debug_text("last_completion.sse", raw)
     _save_debug_text("last_answer.txt", text)
     if thinking:
         _save_debug_text("last_thinking.txt", thinking)
+    _LAST_DEBUG.update(
+        source=source, status=status, done=done, stop=stop,
+        raw_sse=raw, raw_len=len(raw), text=text, text_len=len(text),
+        thinking=thinking, thinking_len=len(thinking),
+    )
     log(
-        f"[claude] ◀ 网络回复 status={status} done={done} stop={stop or '无'} "
+        f"[claude] ◀ 回复 source={source} status={status} done={done} stop={stop or '无'} "
         f"原始SSE={len(raw)}字 正文={len(text)}字 思考={len(thinking)}字"
     )
     log(f"[claude] ◀ 正文预览: {_preview(text)}")
