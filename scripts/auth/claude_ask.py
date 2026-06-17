@@ -206,6 +206,15 @@ def _api_text(page, org_uuid: str, conv_uuid: str) -> str:
     return ""
 
 
+def latest_api_text(page, org_uuid: str = "", timeout: int = 8) -> str:
+    """取最后一条 assistant 的「原始文本」（claude.ai 内部 API，保留 <tool_call> 等标记）。
+
+    DOM 抓取会把模型输出当 HTML 渲染，可能丢掉 <tool_call> 标签；解析工具调用时优先用这个。
+    """
+    conv_uuid = _wait_conv_uuid(page, timeout=timeout)
+    return _api_text(page, org_uuid, conv_uuid)
+
+
 def _wait_answer(page, org_uuid: str, conv_uuid: str, timeout: int = 240) -> tuple[str, str]:
     """轮询直到回答稳定（优先用 API，DOM 兜底），返回 (answer, source)。
 

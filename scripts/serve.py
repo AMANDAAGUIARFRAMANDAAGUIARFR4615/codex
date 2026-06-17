@@ -239,11 +239,37 @@ class Handler(BaseHTTPRequestHandler):
 
         safe_write(OAI.sse_role(completion_id, model))
 
+        # 增量流式：普通文本边生成边发；一旦发现是 <tool_call> 则保留（不外发），
+        # 等拿到完整文本再解析成 tool_calls。这样长回答也会持续有数据流出，
+        # 既避免 frp 把空闲连接断成 502，也让 Cursor 实时看到输出。
+        state = {"mode": None, "emitted": 0}
+
+        def on_delta(cumulative_new: str, full_text: str) -> None:
+            if state["mode"] is None:
+                stripped = full_text.lstrip()
+                if not stripped:
+                    return
+                # claude.ai 可能把 <tool_call> 当未知 HTML 标签渲染，DOM innerText 里只剩
+                # 裸 JSON({...})；为不把工具调用当普通文本流出，开头是 < / { / ``` 一律先保留。
+                looks_like_tool = stripped[0] in "<{" or stripped.startswith("```")
+                state["mode"] = "tool" if looks_like_tool else "text"
+            if state["mode"] == "text":
+                pending = full_text[state["emitted"]:]
+                if pending and safe_write(OAI.sse_content(completion_id, model, pending)):
+                    state["emitted"] = len(full_text)
+
+        accumulated = {"text": ""}
+
+        def adapter(delta: str) -> None:
+            accumulated["text"] += delta
+            on_delta(delta, accumulated["text"])
+
         stop = threading.Event()
 
         def heartbeat() -> None:
+            # 仅在还没有真正内容外发时发心跳（reset/首 token 前、或工具调用保留期）。
             while not stop.wait(5):
-                if not safe_write(OAI.sse_comment()):
+                if state["mode"] != "text" and not safe_write(OAI.sse_comment()):
                     return
 
         beat = threading.Thread(target=heartbeat, daemon=True)
@@ -253,7 +279,7 @@ class Handler(BaseHTTPRequestHandler):
             if should_reset:
                 self._reset_conversation()
             full = claude_ask.stream_answer(
-                self.server.page, prompt, lambda _part: None, org_uuid=self.server.org
+                self.server.page, prompt, adapter, org_uuid=self.server.org
             )
         except Exception as exc:  # noqa: BLE001 — 头已发出，只能在流内收尾
             L.log(f"[openai] 工具模式生成出错: {exc}")
@@ -261,12 +287,33 @@ class Handler(BaseHTTPRequestHandler):
             stop.set()
             beat.join(timeout=6)
 
+        # 工具/保留模式下，DOM 文本可能丢了 <tool_call> 标签；用内部 API 的原始文本兜底解析。
+        if state["mode"] != "text":
+            try:
+                api_full = claude_ask.latest_api_text(self.server.page, self.server.org)
+            except Exception:  # noqa: BLE001
+                api_full = ""
+            if api_full and OAI.extract_tool_calls(api_full):
+                full = api_full
+
         calls = OAI.extract_tool_calls(full)
-        L.log(f"[openai] 工具模式：解析出 {len(calls)} 个工具调用（回答 {len(full)} 字）")
-        if calls:
+        L.log(
+            f"[openai] 工具模式：mode={state['mode']} 解析出 {len(calls)} 个工具调用"
+            f"（回答 {len(full)} 字）"
+        )
+
+        if state["mode"] == "text":
+            # 已边生成边发；补发可能漏掉的尾巴，再收尾。
+            pending = full[state["emitted"]:]
+            if pending:
+                safe_write(OAI.sse_content(completion_id, model, pending))
+            safe_write(OAI.sse_finish(completion_id, model, "stop"))
+            safe_write(OAI.sse_done())
+        elif calls:
             OAI.write_sse_tool_calls(completion_id, model, calls, safe_write, emit_role=False)
         else:
-            safe_write(OAI.sse_content(completion_id, model, OAI.strip_tool_calls(full)))
+            # 保留了内容但没解析出工具调用：把去掉标记的文本作为普通回答发出。
+            safe_write(OAI.sse_content(completion_id, model, OAI.strip_tool_calls(full) or full))
             safe_write(OAI.sse_finish(completion_id, model, "stop"))
             safe_write(OAI.sse_done())
 

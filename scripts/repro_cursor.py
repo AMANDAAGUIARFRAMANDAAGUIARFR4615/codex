@@ -45,21 +45,35 @@ def stream(payload: dict, label: str) -> str:
     t0 = time.time()
     first = None
     collected = []
+    pings = 0
     print(f"\n=== {label} (stream) ===")
     with urllib.request.urlopen(req, timeout=300) as resp:
         for raw in resp:
             line = raw.decode("utf-8", "replace").strip()
             if not line:
                 continue
+            el = time.time() - t0
             if first is None:
-                first = time.time() - t0
-                print(f"[time-to-first-line] {first:.1f}s")
+                first = el
+                print(f"[first-byte] {first:.1f}s")
+            if line.startswith(":"):
+                pings += 1
+                continue
             if line.startswith("data:"):
                 data = line[5:].strip()
                 if data == "[DONE]":
-                    print(f"[DONE] total={time.time()-t0:.1f}s")
+                    print(f"[DONE] total={el:.1f}s pings={pings}")
                     break
                 collected.append(data)
+                try:
+                    d = json.loads(data)["choices"][0]["delta"]
+                    if d.get("content"):
+                        print(f"  +{el:5.1f}s content[{len(d['content'])}]: {d['content'][:40]!r}")
+                    elif d.get("tool_calls"):
+                        tc = d["tool_calls"][0]["function"]
+                        print(f"  +{el:5.1f}s tool_call: {tc['name']}({tc['arguments']})")
+                except Exception:
+                    pass
     print(f"chunks={len(collected)}")
     return "\n".join(collected)
 
