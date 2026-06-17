@@ -10,7 +10,7 @@ venv/
 debug/
 scripts/debug/
 *.log
-cursor-cookies.json
+extensions/
 
 # 本地调试副本
 /1/

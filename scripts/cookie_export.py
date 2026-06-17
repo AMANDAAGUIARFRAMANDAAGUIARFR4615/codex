@@ -44,7 +44,7 @@ def to_cookie_editor_format(cookies: list[dict[str, Any]]) -> list[dict[str, Any
     return exported
 
 
-def print_cookie_editor_export(cookies: list[dict[str, Any]], domain_filter: str = "cursor") -> str:
+def print_cookie_editor_export(cookies: list[dict[str, Any]], domain_filter: str = "claude") -> str:
     filtered = [
         c
         for c in cookies
