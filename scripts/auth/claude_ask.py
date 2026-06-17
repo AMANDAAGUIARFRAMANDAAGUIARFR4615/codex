@@ -159,34 +159,19 @@ def _wait_started(page, timeout: int = 25) -> None:
         page.wait_for_timeout(500)
 
 
-def _wait_done(page, timeout: int = 240) -> str:
-    """轮询直到回答输出结束（停止按钮消失且文本稳定），返回 DOM 抓到的文本。"""
-    start = time.time()
-    deadline = start + timeout
-    last_text = ""
-    last_change = start
-    seen_generating = False
-
+def _wait_conv_uuid(page, timeout: int = 25) -> str:
+    """等待 URL 变成 /chat/<uuid>，拿到 conversation id 供 API 取回答。"""
+    deadline = time.time() + timeout
     while time.time() < deadline:
-        generating = _is_generating(page)
-        seen_generating = seen_generating or generating
-
-        text = _dom_latest(page)
-        if text != last_text:
-            last_text = text
-            last_change = time.time()
-
-        idle = time.time() - last_change
-        if last_text and not generating and idle >= 2.5 and (seen_generating or time.time() - start > 8):
-            return last_text
-
-        page.wait_for_timeout(700)
-
-    log(f"[ask] ⚠️ 等待回答超时（{timeout}s），返回当前已抓到的文本")
-    return last_text
+        match = _CONV_RE.search(page.url or "")
+        if match:
+            return match.group(1)
+        page.wait_for_timeout(500)
+    return ""
 
 
-def _api_latest(page, org_uuid: str, conv_uuid: str) -> str:
+def _api_text(page, org_uuid: str, conv_uuid: str) -> str:
+    """安静地用页面内 fetch 取最后一条 assistant 文本（轮询用，不打日志）。"""
     if not org_uuid or not conv_uuid:
         return ""
     url = (
@@ -195,13 +180,46 @@ def _api_latest(page, org_uuid: str, conv_uuid: str) -> str:
     )
     try:
         result = page.evaluate(_API_LATEST_SCRIPT, url)
-    except Exception as exc:  # noqa: BLE001
-        log(f"[ask] API 兜底取回答异常: {exc}")
+    except Exception:
         return ""
-    if not isinstance(result, dict) or not result.get("ok"):
-        log(f"[ask] API 兜底未取到回答: {result}")
-        return ""
-    return (result.get("text") or "").strip()
+    if isinstance(result, dict) and result.get("ok"):
+        return (result.get("text") or "").strip()
+    return ""
+
+
+def _wait_answer(page, org_uuid: str, conv_uuid: str, timeout: int = 240) -> tuple[str, str]:
+    """轮询直到回答稳定（优先用 API，DOM 兜底），返回 (answer, source)。
+
+    完成判据：文本非空、连续两次读取一致，且（若能检测到）"停止"按钮已消失。
+    基于文本稳定而非具体消息选择器，避免 claude.ai 改版导致一直等到超时。
+    """
+    deadline = time.time() + timeout
+    last = ""
+    source = ""
+    stable = 0
+
+    while time.time() < deadline:
+        generating = _is_generating(page)
+
+        text = _api_text(page, org_uuid, conv_uuid)
+        cur_source = "api"
+        if not text:
+            text = _dom_latest(page)
+            cur_source = "dom"
+
+        if text and text == last:
+            stable += 1
+            if not generating and stable >= 2:
+                return text, source
+        else:
+            stable = 0
+            last = text
+            source = cur_source
+
+        page.wait_for_timeout(2500)
+
+    log(f"[ask] ⚠️ 等待回答超时（{timeout}s），返回当前已抓到的文本")
+    return last, source
 
 
 def ask_claude(page, prompt: str, org_uuid: str = "", timeout: int = 240) -> str:
@@ -217,17 +235,13 @@ def ask_claude(page, prompt: str, org_uuid: str = "", timeout: int = 240) -> str
     _send(page)
 
     _wait_started(page)
-    log("[ask] 回答生成中，等待输出结束...")
-    dom_text = _wait_done(page, timeout=timeout)
+    conv_uuid = _wait_conv_uuid(page)
+    log(f"[ask] 对话 ID: {conv_uuid or '未知'}，等待回答输出结束...")
 
-    conv_match = _CONV_RE.search(page.url or "")
-    conv_uuid = conv_match.group(1) if conv_match else ""
-    api_text = _api_latest(page, org_uuid, conv_uuid)
+    answer, source = _wait_answer(page, org_uuid, conv_uuid, timeout=timeout)
 
     save_debug(page, "claude-answer")
-
-    log(f"[ask] DOM 文本 {len(dom_text)} 字，API 文本 {len(api_text)} 字")
-    answer = api_text or dom_text
+    log(f"[ask] 回答来源={source or '无'}，长度={len(answer)} 字")
     if not answer:
         save_debug(page, "ask-empty-answer")
         raise RuntimeError("已发送问题但未抓取到回答内容。")
