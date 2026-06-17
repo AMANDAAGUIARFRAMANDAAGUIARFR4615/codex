@@ -67,6 +67,9 @@ jobs:
           LOAD_COOKIE_EXTENSION: "true"
           COOKIE_INPUT_FILE: ${{ inputs.cookie_file }}
           CAPSOLVER_API_KEY: ${{ secrets.CAPSOLVER_API_KEY }}
+          # 排查用：打印发出的问题与 claude.ai 返回的原始 SSE（完整内容另存到 debug/ 产物）。
+          CLAUDE_LOG_RAW: "1"
+          CLAUDE_LOG_PREVIEW: "1500"
         run: |
           # 后台启动 frpc，把本机 8787 暴露到 frps 公网端口（见 frpc.toml [[proxies]]）
           ./frpc -c frpc.toml &

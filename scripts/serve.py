@@ -50,6 +50,18 @@ USAGE = (
 )
 
 
+def _log_resolution(calls: list[dict], content: str) -> None:
+    """打印「最终返回给客户端」的内容：工具调用（名+参数预览）或文本回答。"""
+    if calls:
+        preview = ", ".join(
+            f"{c.get('name')}({(c.get('arguments') or '')[:80]})" for c in calls
+        )
+        L.log(f"[openai] ◀ 返回 {len(calls)} 个 tool_calls: {preview}")
+    else:
+        snippet = content if len(content) <= 300 else content[:300] + f"…(共 {len(content)} 字)"
+        L.log(f"[openai] ◀ 返回文本（{len(content)} 字）: {snippet!r}")
+
+
 class AskServer(HTTPServer):
     def __init__(self, addr, handler, page, context, org, api_key: str = ""):
         super().__init__(addr, handler)
@@ -150,9 +162,11 @@ class Handler(BaseHTTPRequestHandler):
             stream = stream.lower() not in ("false", "0", "no")
 
         completion_id = OAI.new_completion_id()
+        msg_count = len(body.get("messages") or [])
+        tool_count = len(body.get("tools") or [])
         L.log(
-            f"[openai] model={model} stream={stream} reset={should_reset} "
-            f"tool_mode={parsed.tool_mode} prompt={prompt[:60]!r}"
+            f"[openai] ▶ 请求 model={model} stream={stream} reset={should_reset} "
+            f"tool_mode={parsed.tool_mode} messages={msg_count} tools={tool_count}"
         )
 
         with self.server.lock:
@@ -207,21 +221,15 @@ class Handler(BaseHTTPRequestHandler):
     def _generate_and_resolve(self, prompt: str, should_reset: bool) -> tuple[list[dict], str]:
         """跑一轮 claude.ai 生成，返回 (tool_calls, 普通文本回答)。
 
-        claude.ai 网页会在 DOM 里混入「Thinking / Thinking for Ns」等思考链 UI，且可能把
-        <tool_call> 当 HTML 标签吞掉，所以最终结果优先取内部 API 的结构化文本（干净、保留
-        <tool_call> 标记），DOM 文本仅作兜底。
+        回答取自 completion 接口的原始 SSE（干净、完整、保留 <tool_call> 标记、自动剔除思考块），
+        无需再做 DOM 解析。拿到完整文本后再解析出工具调用。
         """
         if should_reset:
             self._reset_conversation()
-        dom_full = claude_ask.stream_answer(
+        full = claude_ask.stream_answer(
             self.server.page, prompt, lambda _part: None, org_uuid=self.server.org
         )
-        try:
-            api_full = claude_ask.latest_api_text(self.server.page, self.server.org)
-        except Exception:  # noqa: BLE001
-            api_full = ""
-
-        text = api_full or OAI.strip_thinking_prefix(dom_full)
+        text = OAI.strip_thinking_prefix(full)
         calls = OAI.extract_tool_calls(text)
         return calls, OAI.strip_tool_calls(text)
 
@@ -236,6 +244,7 @@ class Handler(BaseHTTPRequestHandler):
         """
         if not stream:
             calls, content = self._generate_and_resolve(prompt, should_reset)
+            _log_resolution(calls, content)
             if calls:
                 self._json(200, OAI.tool_calls_payload(completion_id, model, calls))
             else:
@@ -274,7 +283,7 @@ class Handler(BaseHTTPRequestHandler):
             stop.set()
             beat.join(timeout=6)
 
-        L.log(f"[openai] 工具模式：解析出 {len(calls)} 个工具调用（回答 {len(content)} 字）")
+        _log_resolution(calls, content)
         if calls:
             OAI.write_sse_tool_calls(completion_id, model, calls, safe_write, emit_role=False)
         else:
@@ -344,6 +353,8 @@ def main() -> None:
 
     with L.sync_playwright() as playwright:
         browser, context = L.launch_browser(playwright)
+        # 在任何导航前注入 completion 网络抓取 hook（回答从原始 SSE 读取，不抓 DOM）。
+        claude_ask.install_capture(context)
         page = context.pages[0] if context.pages else context.new_page()
         page.set_default_timeout(5000)
         try:

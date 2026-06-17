@@ -121,31 +121,20 @@ _CODE_FENCE_RE = re.compile(r"^```[a-zA-Z0-9_]*\s*|\s*```$")
 
 
 def build_tool_preamble(tools: list[dict[str, Any]], tool_choice: Any = None) -> str:
-    """生成教模型如何发起工具调用的协议说明。"""
+    """工具调用协议说明（claude.ai 网页无原生 function calling，用最小提示词补齐）。
+
+    仅描述「如何输出工具调用」这一格式约定，不再注入冗长的角色设定/沙箱说教——
+    Agent 客户端（如 Cursor）自己的 system prompt 已包含任务说明，这里只补协议层。
+    """
     lines = [
-        "You are the backend of an OpenAI-compatible API that powers an external coding agent.",
+        "To use a tool, output one or more blocks in EXACTLY this raw-text format",
+        "(not inside code fences, nothing else around them):",
+        '<tool_call>{"name": "<tool_name>", "arguments": {<json-args>}}</tool_call>',
         "",
-        "CRITICAL ENVIRONMENT RULES (read carefully):",
-        "- You have NO environment of your own. You CANNOT read files, run code, browse a",
-        "  filesystem, or use any built-in code-execution / analysis / sandbox capability.",
-        "- DO NOT use any internal sandbox such as /home/claude or any 'run code' feature.",
-        "  Anything you observe there is irrelevant and WRONG to report.",
-        "- The real machine (its files, shell, network) belongs to the USER and is REMOTE to you.",
-        "  The ONLY way to observe or act on it is by calling the tools listed below.",
-        "- Therefore, whenever a request needs real data or actions (e.g. 'what files are in the",
-        "  current directory'), you MUST emit a tool call. Do NOT answer from your own sandbox and",
-        "  do NOT say you cannot access the environment.",
-        "",
-        "To call tools, output one or more tool-call blocks using EXACTLY this format, as RAW text",
-        "(NOT inside markdown code fences, no extra commentary):",
-        '<tool_call>{"name": "<tool_name>", "arguments": {<json-arguments>}}</tool_call>',
-        "",
-        "Rules:",
-        "- `arguments` MUST be a valid JSON object that matches the tool's parameters schema.",
-        "- You may output multiple <tool_call> blocks in a single reply to call several tools.",
-        "- When you decide to call tools, output ONLY the <tool_call> block(s) and nothing else.",
-        "- After the tool results are provided back to you, either call more tools or, when you",
-        "  have enough information, write the FINAL answer to the user as plain text (no <tool_call>).",
+        "- `arguments` must be valid JSON matching the tool's parameters.",
+        "- When calling tools, reply with only the <tool_call> block(s).",
+        "- After tool results come back, either call more tools or write the final plain-text answer.",
+        "- Use the tools to inspect the real project; do not answer from a sandbox of your own.",
         "",
         "Available tools:",
     ]
@@ -212,10 +201,8 @@ def serialize_conversation(
 
     blocks.append(
         "\n=== END CONVERSATION ===\n"
-        "Now respond. Remember: you have no sandbox of your own; to inspect or change the user's"
-        " machine you MUST emit <tool_call> block(s). Either emit <tool_call> block(s) to call"
-        " tools, or — only if the tool results already give you enough — write the final"
-        " plain-text answer to the user."
+        "Now respond: emit <tool_call> block(s) to call tools, or — if the tool results already"
+        " give you enough — write the final plain-text answer."
     )
     return "\n".join(blocks)
 
