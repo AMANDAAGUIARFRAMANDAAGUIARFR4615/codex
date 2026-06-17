@@ -1,14 +1,15 @@
-# Claude Cookie Import
+# Claude Cookie 登录并提问
 
 通过 GitHub Actions 或本地脚本：
 
 1. 用 [CapSolver](https://www.capsolver.com/) 过 [claude.ai](https://claude.ai) 的 Cloudflare Turnstile
-2. 用 [Cookie-Editor](https://chromewebstore.google.com/detail/cookie-editor/hlkenndednhfkekhgcdicdfddnkalmdm) 导入 `cookie.json`
-3. 重新加载页面并截图，供核验是否登录成功
+2. 用 [Cookie-Editor](https://chromewebstore.google.com/detail/cookie-editor/hlkenndednhfkekhgcdicdfddnkalmdm) 导入 `cookie.json` 登录你自己的账号
+3. 在 claude.ai 新建对话，提出问题并抓取回答（写入运行摘要、`answer.md` 与日志）
 
 ## 输入
 
-仓库根目录的 `cookie.json`（Cookie-Editor JSON 格式，需包含 `.claude.ai` / `claude.ai` 域名的 cookie，尤其是 `sessionKey`）。
+- **问题（prompt）**：通过 GitHub Actions 的 `Run workflow` 表单（或本地 `--prompt`）输入，用你的账号在 claude.ai 提问。
+- **cookie.json**：仓库根目录的 Cookie-Editor JSON（需包含 `.claude.ai` / `claude.ai` 域名的 cookie，尤其是 `sessionKey`）。
 
 ## 运行环境
 
@@ -21,10 +22,18 @@ GitHub Actions 使用 **macOS** runner + **patchright Chromium**（系统 Google
 ### 1. GitHub Actions 手动触发
 
 1. 打开仓库 **Actions** 页
-2. 选择 **Import Claude Cookie**
+2. 选择 **Ask Claude**
 3. 点击 **Run workflow**
-4. 默认使用 `cookie.json`，也可指定其他路径
-5. 运行完成后在 Artifacts 中下载 `claude-after-import` 截图
+4. 在 **问题** 输入框填入要问 claude.ai 的内容（`cookie.json` 默认即可）
+5. 运行完成后：
+   - 在 **Summary** 顶部直接查看「问题 / 回答」
+   - 或在 Artifacts 中下载 `claude-answer`（`answer.md` / `answer.txt`）与 `claude-after-import` 截图
+
+也可以用脚本一键触发并在本地打印回答：
+
+```bash
+python scripts/trigger_actions.py "用一句话介绍你自己。"
+```
 
 ### 2. 本地运行（macOS / Windows 推荐）
 
@@ -36,10 +45,12 @@ export LOAD_COOKIE_EXTENSION=true
 export COOKIE_EDITOR_DIR="$PWD/extensions/cookie-editor"
 export CAPSOLVER_API_KEY="CAP-XXXXXXXX"
 cd scripts
-python login.py ../cookie.json
+python login.py ../cookie.json --prompt "用一句话介绍你自己。"
 ```
 
-截图保存在 `scripts/debug/claude-after-import.png`。
+- 回答保存在 `scripts/debug/answer.md` 与 `scripts/debug/answer.txt`，并打印在日志中。
+- 登录结果截图保存在 `scripts/debug/claude-after-import.png`，提问后截图为 `scripts/debug/claude-answer.png`。
+- 不带 `--prompt` 时只登录并截图，不提问。
 
 ## 工作流程
 
@@ -48,6 +59,7 @@ python login.py ../cookie.json
 3. 打开 Cookie-Editor 弹窗，粘贴 `cookie.json` 并导入
 4. 重新加载 claude.ai，检查是否存在 `sessionKey` cookie
 5. 保存全页截图到 `debug/claude-after-import.png`
+6. 若提供了问题：在 claude.ai 新建对话提问，等待回答输出结束后抓取（DOM + 内部 API 兜底），写入 `debug/answer.md`、日志与运行摘要
 
 ## Cloudflare 自动验证（CapSolver）
 
@@ -64,6 +76,7 @@ export CAPSOLVER_API_KEY="CAP-XXXXXXXX"
 - `COOKIE_INPUT_FILE`：cookie 文件路径，默认 `cookie.json`
 - `COOKIE_EDITOR_DIR`：Cookie-Editor 扩展目录
 - `LOAD_COOKIE_EXTENSION`：是否加载扩展，默认 `true`
+- `CLAUDE_PROMPT`：要向 claude.ai 提的问题（等价于 `--prompt`）
 
 ## 注意事项
 

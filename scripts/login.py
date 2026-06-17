@@ -3,7 +3,11 @@
 过 claude.ai Cloudflare 验证，用 Cookie-Editor 导入 cookie.json，
 重新加载页面并截图供核验。
 
-过 Cloudflare Turnstile 的方式只有一种：CapSolver（见 capsolver_solver.py）。
+若提供了问题（--prompt 或环境变量 CLAUDE_PROMPT），登录成功后会在 claude.ai
+新建对话提问，并把回答写入 debug/answer.md / debug/answer.txt、打印到日志，
+若在 GitHub Actions 中还会写入运行摘要（GITHUB_STEP_SUMMARY）。
+
+过 Cloudflare Turnstile 的方式只有一种：CapSolver（见 auth/capsolver_solver.py）。
 """
 
 from __future__ import annotations
@@ -16,6 +20,11 @@ import tempfile
 import time
 from pathlib import Path
 
+# 辅助模块在重构后位于 scripts/auth 与 scripts/common，加入搜索路径以保持扁平 import。
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(_SCRIPTS_DIR / "auth"))
+sys.path.insert(0, str(_SCRIPTS_DIR / "common"))
+
 try:
     from patchright.sync_api import Browser, BrowserContext, Page, sync_playwright
 
@@ -26,13 +35,15 @@ except ImportError:
     _USING_PATCHRIGHT = False
 
 import capsolver_solver
-from cookie_import import has_claude_session, import_cookies, log
+from claude_ask import ask_claude
+from cookie_import import get_org_uuid, has_claude_session, import_cookies, log
 from debug_utils import save_debug
 from io_utils import setup_utf8_stdio
 
 setup_utf8_stdio()
 
 CLAUDE_URL = "https://claude.ai/"
+CLAUDE_NEW_URL = "https://claude.ai/new"
 
 _CLOUDFLARE_MARKERS = (
     "just a moment",
@@ -225,6 +236,44 @@ def save_result_screenshot(page: Page, label: str = "claude-after-import") -> Pa
     return screenshot
 
 
+def run_ask(context: BrowserContext, page: Page, prompt: str) -> str:
+    """登录成功后，在 claude.ai 新建对话提问并返回回答。"""
+    log("[claude] 打开新对话页面准备提问...")
+    page.goto(CLAUDE_NEW_URL, wait_until="domcontentloaded", timeout=120000)
+    page.wait_for_timeout(2000)
+    wait_for_claude_ready(page, timeout=90)
+
+    org_uuid = get_org_uuid(context)
+    log(f"[ask] 组织 UUID: {org_uuid or '未知（API 兜底可能不可用）'}")
+    answer = ask_claude(page, prompt, org_uuid=org_uuid)
+    log(f"[ask] ✅ 已获取回答（{len(answer)} 字）")
+    return answer
+
+
+def emit_answer(prompt: str, answer: str) -> None:
+    """把回答写入文件、打印到日志、并在 Actions 中写入运行摘要。"""
+    debug_dir = Path("debug")
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    (debug_dir / "answer.txt").write_text(answer, encoding="utf-8")
+    (debug_dir / "answer.md").write_text(
+        f"# 问题\n\n{prompt}\n\n# 回答\n\n{answer}\n", encoding="utf-8"
+    )
+    log(f"[done] 回答已保存: {(debug_dir / 'answer.md').resolve()}")
+
+    print("\n===== CLAUDE ANSWER BEGIN =====")
+    print(answer)
+    print("===== CLAUDE ANSWER END =====\n")
+
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY", "").strip()
+    if summary_path:
+        try:
+            with open(summary_path, "a", encoding="utf-8") as handle:
+                handle.write(f"## 问题\n\n{prompt}\n\n## 回答\n\n{answer}\n")
+            log("[done] 已写入 GitHub Actions 运行摘要")
+        except Exception as exc:  # noqa: BLE001
+            log(f"[done] 写入运行摘要失败: {exc}")
+
+
 def _install_network_logger(page: Page) -> None:
     def _is_cf(url: str) -> bool:
         return "challenges.cloudflare.com" in url or "turnstile" in url
@@ -270,9 +319,11 @@ def resolve_cookie_file(raw: str) -> Path:
     return path.resolve()
 
 
-def run(cookie_file: Path) -> Path:
+def run(cookie_file: Path, prompt: str = "") -> Path:
     log("[start] Claude Cookie 导入脚本启动")
     log(f"[start] Cookie 文件: {cookie_file}")
+    if prompt:
+        log(f"[start] 待提问: {prompt!r}")
 
     if get_extension_dir() is None:
         raise RuntimeError(
@@ -294,7 +345,11 @@ def run(cookie_file: Path) -> Path:
             open_claude(page)
             import_cookies(context, page, cookie_file, use_extension=True)
             reload_and_verify(context, page)
-            return save_result_screenshot(page)
+            screenshot = save_result_screenshot(page)
+            if prompt:
+                answer = run_ask(context, page, prompt)
+                emit_answer(prompt, answer)
+            return screenshot
         except Exception:
             save_debug(page, "error")
             raise
@@ -307,18 +362,24 @@ def run(cookie_file: Path) -> Path:
 
 def main() -> None:
     log("[boot] Python 进程已启动")
-    parser = argparse.ArgumentParser(description="过 claude.ai 验证并导入 Cookie")
+    parser = argparse.ArgumentParser(description="过 claude.ai 验证、导入 Cookie，并可选提问")
     parser.add_argument(
         "cookie_file",
         nargs="?",
         default=os.environ.get("COOKIE_INPUT_FILE", "cookie.json"),
         help="Cookie-Editor JSON 文件路径（默认 cookie.json）",
     )
+    parser.add_argument(
+        "--prompt",
+        default=os.environ.get("CLAUDE_PROMPT", ""),
+        help="登录后向 claude.ai 提的问题（默认读环境变量 CLAUDE_PROMPT）",
+    )
     args = parser.parse_args()
+    prompt = (args.prompt or "").strip()
 
     try:
         cookie_path = resolve_cookie_file(args.cookie_file)
-        screenshot = run(cookie_path)
+        screenshot = run(cookie_path, prompt=prompt)
         print(f"[done] 导入完成，截图已保存: {screenshot}")
     except Exception as exc:
         print(f"[error] {exc}", file=sys.stderr)

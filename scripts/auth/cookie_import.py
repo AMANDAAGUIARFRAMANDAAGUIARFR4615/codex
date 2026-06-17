@@ -168,3 +168,11 @@ def import_cookies(
 def has_claude_session(context: BrowserContext) -> bool:
     names = {c.get("name") for c in context.cookies()}
     return "sessionKey" in names
+
+
+def get_org_uuid(context: BrowserContext) -> str:
+    """从 lastActiveOrg cookie 读取组织 UUID（调用 claude.ai 内部 API 时需要）。"""
+    for cookie in context.cookies():
+        if cookie.get("name") == "lastActiveOrg" and cookie.get("value"):
+            return cookie["value"]
+    return ""

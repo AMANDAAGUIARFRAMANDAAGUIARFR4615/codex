@@ -6,6 +6,11 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+# 辅助模块在重构后位于 scripts/auth 与 scripts/common，加入搜索路径以保持扁平 import。
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(_SCRIPTS_DIR / "auth"))
+sys.path.insert(0, str(_SCRIPTS_DIR / "common"))
+
 import requests
 
 from crx_utils import extract_zip

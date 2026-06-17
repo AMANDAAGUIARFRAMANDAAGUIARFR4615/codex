@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
-"""Trigger GitHub Actions workflow and poll until completion."""
+"""Trigger GitHub Actions workflow and poll until completion.
+
+用法:
+    python trigger_actions.py "你的问题"
+不传则用默认问题（或环境变量 CLAUDE_PROMPT）。运行结束后打印任务日志，
+并高亮 claude.ai 的回答（CLAUDE ANSWER 标记之间的内容）。
+"""
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -14,6 +21,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW_FILE = "import-claude-cookie.yml"
+LOG_STEP_MARKER = "Login and ask Claude"
+DEFAULT_PROMPT = "用一句话介绍你自己。"
 
 
 def auth() -> tuple[str, str]:
@@ -71,31 +80,47 @@ def download(url: str, token: str) -> str:
     raise RuntimeError("Unexpected logs response")
 
 
-def print_failure_logs(run_id: int, token: str, repo: str) -> None:
+def print_job_logs(run_id: int, token: str, repo: str) -> None:
     jobs = api("GET", f"/actions/runs/{run_id}/jobs", token, repo)["jobs"]
     job = jobs[0]
     logs = download(f"https://api.github.com/repos/{repo}/actions/jobs/{job['id']}/logs", token)
     lines = logs.splitlines()
     start = next(
-        (i for i, line in enumerate(lines) if "Pass Cloudflare and import cookies" in line),
+        (i for i, line in enumerate(lines) if LOG_STEP_MARKER in line),
         0,
     )
     print("\n".join(lines[start:]))
+    print_answer(lines)
+
+
+def print_answer(lines: list[str]) -> None:
+    """从日志里抽出 CLAUDE ANSWER 标记之间的回答并高亮打印。"""
+    begin = next((i for i, line in enumerate(lines) if "CLAUDE ANSWER BEGIN" in line), None)
+    end = next((i for i, line in enumerate(lines) if "CLAUDE ANSWER END" in line), None)
+    if begin is None or end is None or end <= begin:
+        return
+    # 去掉每行前面的 GitHub 时间戳前缀。
+    answer = [re.sub(r"^\S+\s", "", ln) for ln in lines[begin + 1 : end]]
+    print("\n========== CLAUDE 回答 ==========")
+    print("\n".join(answer))
+    print("=================================\n")
 
 
 def main() -> None:
+    prompt = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("CLAUDE_PROMPT", DEFAULT_PROMPT)
     token, repo = auth()
     workflow = next(
         item
         for item in api("GET", "/actions/workflows", token, repo)["workflows"]
         if item["path"].endswith(WORKFLOW_FILE)
     )
+    print(f"提问: {prompt!r}")
     dispatch = api(
         "POST",
         f"/actions/workflows/{workflow['id']}/dispatches",
         token,
         repo,
-        {"ref": "main", "inputs": {"cookie_file": "cookie.json"}},
+        {"ref": "main", "inputs": {"prompt": prompt, "cookie_file": "cookie.json"}},
     )
     if dispatch:
         print(json.dumps(dispatch, indent=2))
@@ -112,8 +137,8 @@ def main() -> None:
         conclusion = run.get("conclusion")
         print(f"status={status} conclusion={conclusion}")
         if status == "completed":
+            print_job_logs(run_id, token, repo)
             if conclusion != "success":
-                print_failure_logs(run_id, token, repo)
                 sys.exit(1)
             print("Workflow succeeded")
             return

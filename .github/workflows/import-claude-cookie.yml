@@ -1,8 +1,13 @@
-name: Import Claude Cookie
+name: Ask Claude
 
 on:
   workflow_dispatch:
     inputs:
+      prompt:
+        description: "要向 claude.ai 提的问题"
+        required: true
+        type: string
+        default: "用一句话介绍你自己。"
       cookie_file:
         description: "Cookie-Editor JSON 文件路径（相对仓库根目录）"
         required: false
@@ -12,7 +17,7 @@ on:
 jobs:
   import-cookie:
     runs-on: macos-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
 
     steps:
       - name: Checkout
@@ -40,18 +45,29 @@ jobs:
           python scripts/install_extension.py extensions/cookie-editor
           echo "COOKIE_EDITOR_DIR=$GITHUB_WORKSPACE/extensions/cookie-editor" >> "$GITHUB_ENV"
 
-      - name: Pass Cloudflare and import cookies
-        timeout-minutes: 10
+      - name: Login and ask Claude
+        timeout-minutes: 15
         env:
           PYTHONUNBUFFERED: "1"
           PYTHONIOENCODING: utf-8
           PLAYWRIGHT_HEADLESS: "false"
           LOAD_COOKIE_EXTENSION: "true"
           COOKIE_INPUT_FILE: ${{ inputs.cookie_file }}
+          CLAUDE_PROMPT: ${{ inputs.prompt }}
           CAPSOLVER_API_KEY: ${{ secrets.CAPSOLVER_API_KEY }}
         run: |
           cd scripts
-          python -u login.py "$COOKIE_INPUT_FILE"
+          python -u login.py "$COOKIE_INPUT_FILE" --prompt "$CLAUDE_PROMPT"
+
+      - name: Upload Claude answer
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-answer
+          path: |
+            scripts/debug/answer.md
+            scripts/debug/answer.txt
+          if-no-files-found: ignore
 
       - name: Upload debug artifacts
         if: always()
