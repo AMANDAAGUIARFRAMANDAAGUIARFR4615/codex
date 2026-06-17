@@ -18,7 +18,7 @@ import json
 import os
 import sys
 import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Callable
 from urllib.parse import urlparse
@@ -62,11 +62,10 @@ def _log_resolution(calls: list[dict], content: str) -> None:
         L.log(f"[openai] ◀ 返回文本（{len(content)} 字）: {snippet!r}")
 
 
-class AskServer(ThreadingHTTPServer):
-    # 多线程：每个连接独立线程，避免上一条 keep-alive 连接占着单线程导致新请求被 frp
-    # 判超时（502）。真正的 claude.ai 生成仍由 self.lock 串行化（只有一个页面）。
-    daemon_threads = True
-
+class AskServer(HTTPServer):
+    # 单线程：Playwright 同步 API 绑定创建它的线程，必须在同一线程驱动页面，故不能用
+    # ThreadingHTTPServer。改用「每请求一条短连接」（Connection: close，见 Handler），
+    # 避免上一条 keep-alive 连接占住单线程、让新请求被 frp 判超时（502）。
     def __init__(self, addr, handler, page, context, org, api_key: str = ""):
         super().__init__(addr, handler)
         self.page = page
@@ -86,6 +85,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
+        # 每请求一条短连接：服务端单线程，回应后即关连接，下个请求另开，避免被 keep-alive 阻塞。
+        self.send_header("Connection", "close")
+        self.close_connection = True
 
     def _json(self, code: int, payload: dict):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -208,8 +210,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "keep-alive")
-        self._cors()
+        self._cors()  # 含 Connection: close
         self.end_headers()
 
         def write(data: bytes):
