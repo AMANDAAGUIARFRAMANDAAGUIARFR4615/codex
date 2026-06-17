@@ -391,46 +391,79 @@ def sse_done() -> bytes:
     return b"data: [DONE]\n\n"
 
 
+def sse_comment(text: str = "keep-alive") -> bytes:
+    """SSE 注释行（以 ':' 开头），客户端会忽略，用作心跳防止连接被中间层断开。"""
+    return f": {text}\n\n".encode("utf-8")
+
+
+def _chunk(completion_id: str, model: str, delta: dict[str, Any], finish: str | None = None) -> dict[str, Any]:
+    return {
+        "id": completion_id,
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+    }
+
+
+def sse_role(completion_id: str, model: str) -> bytes:
+    return sse_line(_chunk(completion_id, model, {"role": "assistant"}))
+
+
+def sse_content(completion_id: str, model: str, text: str) -> bytes:
+    return sse_line(_chunk(completion_id, model, {"content": text}))
+
+
+def sse_finish(completion_id: str, model: str, reason: str = "stop") -> bytes:
+    return sse_line(_chunk(completion_id, model, {}, finish=reason))
+
+
+def sse_tool_calls_delta(completion_id: str, model: str, calls: list[dict[str, str]]) -> list[bytes]:
+    out: list[bytes] = []
+    for index, call in enumerate(calls):
+        out.append(
+            sse_line(
+                _chunk(
+                    completion_id,
+                    model,
+                    {
+                        "tool_calls": [
+                            {
+                                "index": index,
+                                "id": new_tool_call_id(),
+                                "type": "function",
+                                "function": {
+                                    "name": call["name"],
+                                    "arguments": call["arguments"],
+                                },
+                            }
+                        ]
+                    },
+                )
+            )
+        )
+    return out
+
+
 def make_sse_delta_writer(
     completion_id: str,
     model: str,
     on_write: Callable[[bytes], None],
+    emit_role: bool = True,
 ) -> Callable[[str], None]:
     """返回传给 stream_answer 的 on_delta：把纯文本增量包装成 OpenAI SSE chunk。"""
-    created = int(time.time())
-    role_chunk = {
-        "id": completion_id,
-        "object": "chat.completion.chunk",
-        "created": created,
-        "model": model,
-        "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
-    }
-    on_write(sse_line(role_chunk))
+    if emit_role:
+        on_write(sse_role(completion_id, model))
 
     def emit(text: str) -> None:
-        if not text:
-            return
-        chunk = {
-            "id": completion_id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": model,
-            "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}],
-        }
-        on_write(sse_line(chunk))
+        if text:
+            on_write(sse_content(completion_id, model, text))
 
     return emit
 
 
 def write_sse_finish(completion_id: str, model: str, on_write: Callable[[bytes], None]) -> None:
-    finish = {
-        "id": completion_id,
-        "object": "chat.completion.chunk",
-        "created": int(time.time()),
-        "model": model,
-        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-    }
-    on_write(sse_line(finish))
+    on_write(sse_finish(completion_id, model, "stop"))
     on_write(sse_done())
 
 
@@ -439,61 +472,12 @@ def write_sse_tool_calls(
     model: str,
     calls: list[dict[str, str]],
     on_write: Callable[[bytes], None],
+    emit_role: bool = True,
 ) -> None:
     """把工具调用以 OpenAI 流式格式（delta.tool_calls）发出，并以 tool_calls 结束。"""
-    created = int(time.time())
-    on_write(
-        sse_line(
-            {
-                "id": completion_id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": model,
-                "choices": [
-                    {"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}
-                ],
-            }
-        )
-    )
-    for index, call in enumerate(calls):
-        on_write(
-            sse_line(
-                {
-                    "id": completion_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": model,
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {
-                                "tool_calls": [
-                                    {
-                                        "index": index,
-                                        "id": new_tool_call_id(),
-                                        "type": "function",
-                                        "function": {
-                                            "name": call["name"],
-                                            "arguments": call["arguments"],
-                                        },
-                                    }
-                                ]
-                            },
-                            "finish_reason": None,
-                        }
-                    ],
-                }
-            )
-        )
-    on_write(
-        sse_line(
-            {
-                "id": completion_id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": model,
-                "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
-            }
-        )
-    )
+    if emit_role:
+        on_write(sse_role(completion_id, model))
+    for chunk in sse_tool_calls_delta(completion_id, model, calls):
+        on_write(chunk)
+    on_write(sse_finish(completion_id, model, "tool_calls"))
     on_write(sse_done())

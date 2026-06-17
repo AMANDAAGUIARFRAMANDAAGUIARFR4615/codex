@@ -157,14 +157,17 @@ class Handler(BaseHTTPRequestHandler):
 
         with self.server.lock:
             try:
-                if should_reset:
-                    self._reset_conversation()
                 if parsed.tool_mode:
-                    self._tool_completion(completion_id, model, prompt, stream)
-                elif stream:
-                    self._stream_completion(completion_id, model, prompt)
+                    # 工具模式：reset + 生成都在 _tool_completion 内进行，
+                    # 流式时先开 SSE 并发心跳，避免长耗时被 frp 断成 502。
+                    self._tool_completion(completion_id, model, prompt, stream, should_reset)
                 else:
-                    self._blocking_completion(completion_id, model, prompt)
+                    if should_reset:
+                        self._reset_conversation()
+                    if stream:
+                        self._stream_completion(completion_id, model, prompt)
+                    else:
+                        self._blocking_completion(completion_id, model, prompt)
             except (BrokenPipeError, ConnectionResetError):
                 L.log("[openai] 客户端已断开")
             except Exception as exc:  # noqa: BLE001
@@ -201,31 +204,71 @@ class Handler(BaseHTTPRequestHandler):
         OAI.write_sse_finish(completion_id, model, write)
         L.log(f"[openai] 流式完成（{len(full)} 字）")
 
-    def _tool_completion(self, completion_id: str, model: str, prompt: str, stream: bool) -> None:
-        """Agent / 工具调用：先取完整回答（无法边生成边判定是否工具调用），再决定输出。"""
-        full = claude_ask.stream_answer(
-            self.server.page,
-            prompt,
-            lambda _part: None,
-            org_uuid=self.server.org,
-        )
-        calls = OAI.extract_tool_calls(full)
-        content = OAI.strip_tool_calls(full)
-        L.log(f"[openai] 工具模式：解析出 {len(calls)} 个工具调用（回答 {len(full)} 字）")
+    def _tool_completion(
+        self, completion_id: str, model: str, prompt: str, stream: bool, should_reset: bool
+    ) -> None:
+        """Agent / 工具调用。
 
-        if stream:
-            write = self._begin_sse()
-            if calls:
-                OAI.write_sse_tool_calls(completion_id, model, calls, write)
-            else:
-                emit = OAI.make_sse_delta_writer(completion_id, model, write)
-                emit(content)
-                OAI.write_sse_finish(completion_id, model, write)
-        else:
+        无法边生成边判定是否工具调用（需看完整文本），所以这里会先缓冲完整回答。
+        缓冲期间（含 reset 导航与生成）流式模式会持续发心跳，防止 frp 把长连接断成
+        502，从而让 Cursor 一直卡住。
+        """
+        if not stream:
+            if should_reset:
+                self._reset_conversation()
+            full = claude_ask.stream_answer(
+                self.server.page, prompt, lambda _part: None, org_uuid=self.server.org
+            )
+            calls = OAI.extract_tool_calls(full)
             if calls:
                 self._json(200, OAI.tool_calls_payload(completion_id, model, calls))
             else:
-                self._json(200, OAI.completion_payload(completion_id, model, content))
+                self._json(200, OAI.completion_payload(completion_id, model, OAI.strip_tool_calls(full)))
+            return
+
+        write = self._begin_sse()
+        write_lock = threading.Lock()
+
+        def safe_write(data: bytes) -> bool:
+            with write_lock:
+                try:
+                    write(data)
+                    return True
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    return False
+
+        safe_write(OAI.sse_role(completion_id, model))
+
+        stop = threading.Event()
+
+        def heartbeat() -> None:
+            while not stop.wait(5):
+                if not safe_write(OAI.sse_comment()):
+                    return
+
+        beat = threading.Thread(target=heartbeat, daemon=True)
+        beat.start()
+        full = ""
+        try:
+            if should_reset:
+                self._reset_conversation()
+            full = claude_ask.stream_answer(
+                self.server.page, prompt, lambda _part: None, org_uuid=self.server.org
+            )
+        except Exception as exc:  # noqa: BLE001 — 头已发出，只能在流内收尾
+            L.log(f"[openai] 工具模式生成出错: {exc}")
+        finally:
+            stop.set()
+            beat.join(timeout=6)
+
+        calls = OAI.extract_tool_calls(full)
+        L.log(f"[openai] 工具模式：解析出 {len(calls)} 个工具调用（回答 {len(full)} 字）")
+        if calls:
+            OAI.write_sse_tool_calls(completion_id, model, calls, safe_write, emit_role=False)
+        else:
+            safe_write(OAI.sse_content(completion_id, model, OAI.strip_tool_calls(full)))
+            safe_write(OAI.sse_finish(completion_id, model, "stop"))
+            safe_write(OAI.sse_done())
 
     def _blocking_completion(self, completion_id: str, model: str, prompt: str) -> None:
         full = claude_ask.stream_answer(
