@@ -288,6 +288,26 @@ def strip_tool_calls(text: str) -> str:
     return _TOOL_CALL_RE.sub("", text or "").strip()
 
 
+_THINKING_LINE_RE = re.compile(r"^(?:thinking|thought)(?:\s+for\s+[\d.]+\s*\w+)?$", re.IGNORECASE)
+_THINKING_FOR_RE = re.compile(r"^for\s+[\d.]+\s*\w+$", re.IGNORECASE)
+
+
+def strip_thinking_prefix(text: str) -> str:
+    """去掉 claude.ai DOM 抓取里开头的「Thinking / Thinking for Ns」思考链 UI 文本。
+
+    仅作 DOM 兜底用；优先来源（内部 API 文本）本就不含思考块。
+    """
+    lines = (text or "").split("\n")
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].strip()
+        if stripped == "" or _THINKING_LINE_RE.match(stripped) or _THINKING_FOR_RE.match(stripped):
+            i += 1
+            continue
+        break
+    return "\n".join(lines[i:]).strip()
+
+
 def _strip_code_fence(text: str) -> str:
     if text.startswith("```"):
         text = _CODE_FENCE_RE.sub("", text)

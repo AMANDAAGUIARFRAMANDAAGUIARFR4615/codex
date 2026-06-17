@@ -162,6 +162,16 @@ def test_strip_tool_calls():
     assert OAI.strip_tool_calls(text) == "beforeafter"
 
 
+def test_strip_thinking_prefix():
+    text = "Thinking\nThinking for 0s\n\n当前目录有 a.py 和 b.py。"
+    assert OAI.strip_thinking_prefix(text) == "当前目录有 a.py 和 b.py。"
+
+
+def test_strip_thinking_prefix_keeps_plain_text():
+    text = "当前目录有 a.py。\n第二行。"
+    assert OAI.strip_thinking_prefix(text) == text
+
+
 def test_tool_calls_payload_shape():
     payload = OAI.tool_calls_payload(
         "id1", "claude", [{"name": "list_dir", "arguments": "{}"}]
