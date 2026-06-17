@@ -18,7 +18,7 @@ import json
 import os
 import sys
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
 from urllib.parse import urlparse
@@ -62,7 +62,11 @@ def _log_resolution(calls: list[dict], content: str) -> None:
         L.log(f"[openai] ◀ 返回文本（{len(content)} 字）: {snippet!r}")
 
 
-class AskServer(HTTPServer):
+class AskServer(ThreadingHTTPServer):
+    # 多线程：每个连接独立线程，避免上一条 keep-alive 连接占着单线程导致新请求被 frp
+    # 判超时（502）。真正的 claude.ai 生成仍由 self.lock 串行化（只有一个页面）。
+    daemon_threads = True
+
     def __init__(self, addr, handler, page, context, org, api_key: str = ""):
         super().__init__(addr, handler)
         self.page = page
