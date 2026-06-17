@@ -1,7 +1,20 @@
 [
     {
         "domain": ".claude.ai",
-        "expirationDate": 1781668894.472767,
+        "expirationDate": 1789478478,
+        "hostOnly": false,
+        "httpOnly": false,
+        "name": "_gcl_au",
+        "path": "/",
+        "sameSite": null,
+        "secure": false,
+        "session": false,
+        "storeId": null,
+        "value": "1.1.1220101409.1781702478"
+    },
+    {
+        "domain": ".claude.ai",
+        "expirationDate": 1781704359.639284,
         "hostOnly": false,
         "httpOnly": true,
         "name": "__cf_bm",
@@ -10,11 +23,11 @@
         "secure": true,
         "session": false,
         "storeId": null,
-        "value": "cvxIyvVNh9dxnjQyoWao4ohdeAwrTJINfz0D_UvO1Jo-1781667091.7642624-1.0.1.1-KUxghP8yDgXAX9YJPiuTTsfrfMGwNoVN51SX2wzmWkgxGz2MMfGSczJjEn8c_uUI0rkCxdoJn.oVjdlPjmbzM0_rX.ev4mDF7CJ0t6gChEM8W7sjhUSBXqVaxd5g9MS5"
+        "value": "JV6dSwWhKbt1ei7Ni.z4ueZNdhK1rPLxScMguRCLtGA-1781702557.1909816-1.0.1.1-l4ZLeJ8iIYsplt_lxMa4Gm_bcGq8oqO6thyhFxvDxq3EnceQp99oRwOw3s9VW4mzd2Ximaqe_1Dksb91qnr96lAnvQqTymh69HbjBP11dYKwKNC50yB41_EU.Y.ofpE7"
     },
     {
         "domain": ".claude.ai",
-        "expirationDate": 1813194672.444091,
+        "expirationDate": 1813238553.568289,
         "hostOnly": false,
         "httpOnly": false,
         "name": "CH-prefers-color-scheme",
@@ -27,7 +40,7 @@
     },
     {
         "domain": "claude.ai",
-        "expirationDate": 1781701871.073869,
+        "expirationDate": 1781745752.893404,
         "hostOnly": true,
         "httpOnly": false,
         "name": "activitySessionId",
@@ -36,11 +49,11 @@
         "secure": true,
         "session": false,
         "storeId": null,
-        "value": "dd5e23da-18ba-4e0c-a226-ba6da6e3004c"
+        "value": "c58159a7-8d13-4ec2-b272-0a7487bddc53"
     },
     {
         "domain": "claude.ai",
-        "expirationDate": 1807578671.073583,
+        "expirationDate": 1807622552.893288,
         "hostOnly": true,
         "httpOnly": false,
         "name": "anthropic-device-id",
@@ -49,11 +62,11 @@
         "secure": true,
         "session": false,
         "storeId": null,
-        "value": "709f10bb-e608-4dac-8c57-b33e7aad2803"
+        "value": "9432f3d8-b0ab-447d-a6cc-ceb369107e57"
     },
     {
         "domain": ".claude.ai",
-        "expirationDate": 1784222145.688048,
+        "expirationDate": 1784294557.724378,
         "hostOnly": false,
         "httpOnly": true,
         "name": "routingHint",
@@ -62,7 +75,7 @@
         "secure": true,
         "session": false,
         "storeId": null,
-        "value": "sk-ant-rh-eyJ0eXAiOiAiSldUIiwgImFsZyI6ICJFUzI1NiIsICJraWQiOiAiN0MxcWFPRnhqdWxaUjRFQnNuNk1UeUZGNWdDV2JHbFpNVDR2RklrRFFpbyJ9.eyJzdWIiOiAiMjRiZjkxMzMtMjk5Ny00ZDBiLTkxNDYtNzAxYzI0OWZkNmNiIiwgImlhdCI6IDE3ODE2MzAxNDQsICJpc3MiOiAiY2xhdWRlLWFpLXJvdXRpbmciLCAib25ib2FyZGluZ19jb21wbGV0ZSI6IHRydWUsICJwaG9uZV92ZXJpZmllZCI6IGZhbHNlLCAiYWdlX3ZlcmlmaWVkIjogdHJ1ZX0.N73OcfHlS8MxIpjvv72A_Hh7Y1aiecv4v3Qn17owjVDJAh5SJ9omeduhI2nmXv3PyWzw7G6i6lyeYTGZ2e59VQ"
+        "value": "sk-ant-rh-eyJ0eXAiOiAiSldUIiwgImFsZyI6ICJFUzI1NiIsICJraWQiOiAiN0MxcWFPRnhqdWxaUjRFQnNuNk1UeUZGNWdDV2JHbFpNVDR2RklrRFFpbyJ9.eyJzdWIiOiAiYWFhM2Q1YmQtNjcxOS00NGU2LThjNWEtOGFkODRmYTZjZDhlIiwgImlhdCI6IDE3ODE3MDI1NTUsICJpc3MiOiAiY2xhdWRlLWFpLXJvdXRpbmciLCAib25ib2FyZGluZ19jb21wbGV0ZSI6IHRydWUsICJwaG9uZV92ZXJpZmllZCI6IGZhbHNlLCAiYWdlX3ZlcmlmaWVkIjogdHJ1ZX0.ywFCInBxyRH8mARzu3sFg4IJtsjVXiETg7Fb6Prxti3cYUKpZRxaZ8q5lWPrR1k3vcedm2rKbkm86_7cXNuHRw"
     },
     {
         "domain": ".claude.ai",
@@ -74,7 +87,7 @@
         "secure": true,
         "session": true,
         "storeId": null,
-        "value": "uCkj2nntraWK8PBKAmmr2dKJZNxlAkkC9a2sQgNeSUM-1781630019.6335196-1.0.1.1-jRcJc7S5e7UcU12oGP.IWHQ750iCrpOld_P6IuUDzjs"
+        "value": "AoYcQer6M0_7Ruu9_z.dbsdg7JPibsRQ5bK1JMF4TnA-1781702472.2261798-1.0.1.1-aTo6f2ttL6XXgodyxiJJ5C46jDapaNCAIFXY754ZAlE"
     },
     {
         "domain": "claude.ai",
@@ -86,24 +99,24 @@
         "secure": true,
         "session": true,
         "storeId": null,
-        "value": "83594f2d-cf37-4720-bc43-085183ed5294"
+        "value": "b91cee5a-c8d0-4120-8035-e9ed181e4f52"
     },
     {
-        "domain": ".claude.ai",
-        "expirationDate": 1813191541.307771,
-        "hostOnly": false,
+        "domain": "claude.ai",
+        "expirationDate": 1797254477,
+        "hostOnly": true,
         "httpOnly": false,
-        "name": "user-sidebar-pinned",
+        "name": "g_state",
         "path": "/",
-        "sameSite": "lax",
-        "secure": true,
+        "sameSite": null,
+        "secure": false,
         "session": false,
         "storeId": null,
-        "value": "true"
+        "value": "{\"i_l\":0,\"i_ll\":1781702477729,\"i_b\":\"IqlVMrECuHV4sXnifVLHSYl5Vn/NyXXWEchDXF0542k\",\"i_e\":{\"enable_itp_optimization\":24},\"i_et\":1781702477727}"
     },
     {
         "domain": ".claude.ai",
-        "expirationDate": 1784051707.781186,
+        "expirationDate": 1784121757.7242,
         "hostOnly": false,
         "httpOnly": true,
         "name": "sessionKey",
@@ -112,11 +125,24 @@
         "secure": true,
         "session": false,
         "storeId": null,
-        "value": "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"
+        "value": "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"
+    },
+    {
+        "domain": "claude.ai",
+        "expirationDate": 1813238640,
+        "hostOnly": true,
+        "httpOnly": false,
+        "name": "_dd_s",
+        "path": "/",
+        "sameSite": "strict",
+        "secure": false,
+        "session": false,
+        "storeId": null,
+        "value": "aid=98d3695d-5890-48eb-8708-238ce60979a6&rum=2&id=3668242f-bf9d-4c3d-a90e-5413b46816a5&created=1781702476114&expire=1781703540077"
     },
     {
         "domain": ".claude.ai",
-        "expirationDate": 1816190020.030762,
+        "expirationDate": 1816262474.643485,
         "hostOnly": false,
         "httpOnly": false,
         "name": "_fbp",
@@ -125,11 +151,11 @@
         "secure": true,
         "session": false,
         "storeId": null,
-        "value": "fb.1.1781630019641.69575256563079600"
+        "value": "fb.1.1781702472232.71612801221960050"
     },
     {
         "domain": ".claude.ai",
-        "expirationDate": 1813194672.345553,
+        "expirationDate": 1813238553.528721,
         "hostOnly": false,
         "httpOnly": false,
         "name": "ajs_anonymous_id",
@@ -138,11 +164,11 @@
         "secure": true,
         "session": false,
         "storeId": null,
-        "value": "claudeai.v1.e7d2d4ff-a7a2-4c3f-9e53-fdbb2c40cf74"
+        "value": "claudeai.v1.654f3bcd-f6d5-4759-b42b-1d311c88b3a9"
     },
     {
         "domain": ".claude.ai",
-        "expirationDate": 1813194672.87734,
+        "expirationDate": 1813238558.333317,
         "hostOnly": false,
         "httpOnly": false,
         "name": "lastActiveOrg",
@@ -151,11 +177,11 @@
         "secure": true,
         "session": false,
         "storeId": null,
-        "value": "c2ec5ba5-6695-4736-9c06-e9bc5f17e9c3"
+        "value": "fceee594-1817-4652-87bc-e6c4430dc04c"
     },
     {
         "domain": ".claude.ai",
-        "expirationDate": 1784051707.781306,
+        "expirationDate": 1784121757.72429,
         "hostOnly": false,
         "httpOnly": false,
         "name": "sessionKeyLC",
@@ -164,11 +190,11 @@
         "secure": true,
         "session": false,
         "storeId": null,
-        "value": "1781630144971"
+        "value": "1781702555106"
     },
     {
         "domain": ".claude.ai",
-        "expirationDate": 1813194672.434383,
+        "expirationDate": 1813238641.963038,
         "hostOnly": false,
         "httpOnly": false,
         "name": "user-sidebar-visible-on-load",
