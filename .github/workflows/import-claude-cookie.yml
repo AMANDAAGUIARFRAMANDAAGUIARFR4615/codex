@@ -1,23 +1,27 @@
-name: Ask Claude
+name: Serve Claude (frp)
 
 on:
   workflow_dispatch:
     inputs:
-      prompt:
-        description: "要向 claude.ai 提的问题"
-        required: true
+      minutes:
+        description: "服务存活时长（分钟），期间可多次提问"
+        required: false
         type: string
-        default: "用一句话介绍你自己。"
+        default: "30"
       cookie_file:
         description: "Cookie-Editor JSON 文件路径（相对仓库根目录）"
         required: false
         type: string
         default: "cookie.json"
 
+env:
+  FRP_VERSION: "0.69.1"
+  SERVE_PORT: "8787"
+
 jobs:
-  import-cookie:
+  serve-claude:
     runs-on: macos-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
@@ -45,42 +49,38 @@ jobs:
           python scripts/install_extension.py extensions/cookie-editor
           echo "COOKIE_EDITOR_DIR=$GITHUB_WORKSPACE/extensions/cookie-editor" >> "$GITHUB_ENV"
 
-      - name: Login and ask Claude
-        timeout-minutes: 15
+      - name: Download frp client (frpc)
+        run: |
+          curl -fsSL -o frp.tgz \
+            "https://github.com/fatedier/frp/releases/download/v${FRP_VERSION}/frp_${FRP_VERSION}_darwin_arm64.tar.gz"
+          tar -xzf frp.tgz
+          cp "frp_${FRP_VERSION}_darwin_arm64/frpc" ./frpc
+          chmod +x ./frpc
+          ./frpc --version
+
+      - name: Serve Claude over frp
+        timeout-minutes: 40
         env:
           PYTHONUNBUFFERED: "1"
           PYTHONIOENCODING: utf-8
           PLAYWRIGHT_HEADLESS: "false"
           LOAD_COOKIE_EXTENSION: "true"
           COOKIE_INPUT_FILE: ${{ inputs.cookie_file }}
-          CLAUDE_PROMPT: ${{ inputs.prompt }}
           CAPSOLVER_API_KEY: ${{ secrets.CAPSOLVER_API_KEY }}
         run: |
+          # 后台启动 frpc，把本机 8787 暴露到 frps 公网端口（见 frpc.toml [[proxies]]）
+          ./frpc -c frpc.toml &
+          FRPC_PID=$!
+          echo "frpc started, pid=$FRPC_PID"
+          # 前台运行常驻提问服务（登录 + HTTP 服务，存活 inputs.minutes 分钟）
           cd scripts
-          python -u login.py "$COOKIE_INPUT_FILE" --prompt "$CLAUDE_PROMPT"
-
-      - name: Upload Claude answer
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: claude-answer
-          path: |
-            scripts/debug/answer.md
-            scripts/debug/answer.txt
-          if-no-files-found: ignore
+          python -u serve.py "$COOKIE_INPUT_FILE" --minutes "${{ inputs.minutes }}" --port "$SERVE_PORT"
+          kill "$FRPC_PID" 2>/dev/null || true
 
       - name: Upload debug artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: claude-import-debug
+          name: claude-serve-debug
           path: scripts/debug/
           if-no-files-found: ignore
-
-      - name: Upload result screenshot
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: claude-after-import
-          path: scripts/debug/claude-after-import.png
-          if-no-files-found: error

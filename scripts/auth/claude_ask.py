@@ -39,15 +39,34 @@ STOP_BUTTON_SELECTORS = [
 
 _CONV_RE = re.compile(r"/chat/([0-9a-fA-F-]{36})")
 
+# 助手回答容器：claude.ai 现用 .font-claude-response（旧版 .font-claude-message）。
+# 这个容器在流式输出时会逐字增长，可用于实时抓取。
+_RESPONSE_SELECTOR = ".font-claude-response, .font-claude-message"
+
 # 取页面上最后一条助手消息的纯文本。
 _DOM_LATEST_SCRIPT = """
 () => {
   const pick = (sel) => Array.from(document.querySelectorAll(sel));
-  let nodes = pick('.font-claude-message');
+  let nodes = pick('.font-claude-response, .font-claude-message');
   if (!nodes.length) nodes = pick('[data-testid="message-content"]');
   if (!nodes.length) return '';
   const el = nodes[nodes.length - 1];
   return (el.innerText || el.textContent || '').trim();
+}
+"""
+
+# 当前助手回答个数（发问前后对比，确认新回答已出现）。
+_COUNT_RESPONSES_SCRIPT = (
+    "() => document.querySelectorAll('.font-claude-response, .font-claude-message').length"
+)
+
+# 取“最后一条且序号大于 base”的回答原文（未出现新回答时返回 null），流式轮询用。
+_LATEST_RESPONSE_SCRIPT = """
+(base) => {
+  const els = document.querySelectorAll('.font-claude-response, .font-claude-message');
+  if (els.length <= base) return null;
+  const el = els[els.length - 1];
+  return el.innerText || el.textContent || '';
 }
 """
 
@@ -246,3 +265,74 @@ def ask_claude(page, prompt: str, org_uuid: str = "", timeout: int = 240) -> str
         save_debug(page, "ask-empty-answer")
         raise RuntimeError("已发送问题但未抓取到回答内容。")
     return answer
+
+
+def _count_responses(page) -> int:
+    try:
+        return int(page.evaluate(_COUNT_RESPONSES_SCRIPT) or 0)
+    except Exception:
+        return 0
+
+
+def _latest_response(page, base: int) -> str:
+    try:
+        text = page.evaluate(_LATEST_RESPONSE_SCRIPT, base)
+    except Exception:
+        return ""
+    return text or ""
+
+
+def stream_answer(
+    page,
+    prompt: str,
+    on_delta,
+    *,
+    org_uuid: str = "",
+    timeout: int = 240,
+    poll_ms: int = 300,
+    settle_s: float = 1.5,
+) -> str:
+    """发送 prompt 并把回答“增量”实时回调给 on_delta(delta_str)，返回完整回答。
+
+    通过轮询最后一条 .font-claude-response 的 innerText 实现流式：每次只把新增部分
+    交给 on_delta。判定结束：文本不再增长且“停止”按钮已消失并稳定 settle_s 秒。
+    DOM 一直抓不到时，用内部 API 兜底一次性返回全文。
+    """
+    composer = _wait_composer(page)
+    if composer is None:
+        save_debug(page, "ask-no-composer")
+        raise RuntimeError("未找到 claude.ai 输入框（可能未登录或页面结构变化）。")
+
+    base = _count_responses(page)
+    _fill_prompt(page, composer, prompt)
+    page.wait_for_timeout(200)
+    _send(page)
+    _wait_started(page)
+
+    prev = ""
+    last_grow = time.time()
+    deadline = time.time() + timeout
+
+    while time.time() < deadline:
+        text = _latest_response(page, base)
+        if len(text) > len(prev):
+            on_delta(text[len(prev):])
+            prev = text
+            last_grow = time.time()
+        else:
+            idle = time.time() - last_grow
+            generating = _is_generating(page)
+            if prev and not generating and idle >= settle_s:
+                break
+            if prev and idle >= 12:  # 兜底：长时间不增长也不再傻等
+                break
+        page.wait_for_timeout(poll_ms)
+
+    if not prev:
+        conv_uuid = _wait_conv_uuid(page, timeout=8)
+        api_text = _api_text(page, org_uuid, conv_uuid)
+        if api_text:
+            on_delta(api_text)
+            prev = api_text
+
+    return prev

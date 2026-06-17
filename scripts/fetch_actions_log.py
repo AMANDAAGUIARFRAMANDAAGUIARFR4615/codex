@@ -59,7 +59,7 @@ def main() -> None:
     logs = download(job["logs_url"], token)
     lines = logs.splitlines()
     start = next(
-        (i for i, line in enumerate(lines) if "Login and ask Claude" in line),
+        (i for i, line in enumerate(lines) if "Serve Claude over frp" in line),
         0,
     )
     for line in lines[start : start + 400]:

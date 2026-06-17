@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Trigger GitHub Actions workflow and poll until completion.
+"""触发 GitHub Actions 上的 "Serve Claude (frp)" 工作流。
 
 用法:
-    python trigger_actions.py "你的问题"
-不传则用默认问题（或环境变量 CLAUDE_PROMPT）。运行结束后打印任务日志，
-并高亮 claude.ai 的回答（CLAUDE ANSWER 标记之间的内容）。
+    python trigger_actions.py [分钟数]        # 默认 30
+    python trigger_actions.py --logs          # 打印最近一次运行的日志（排错）
+
+触发后不会长时间阻塞：打印运行 URL 与「如何从控制台连上提问」的命令。
+服务在 runner 上登录 claude.ai 并通过 frp 暴露，登录约需 2-3 分钟。
 """
 
 from __future__ import annotations
@@ -21,8 +23,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW_FILE = "import-claude-cookie.yml"
-LOG_STEP_MARKER = "Login and ask Claude"
-DEFAULT_PROMPT = "用一句话介绍你自己。"
+LOG_STEP_MARKER = "Serve Claude over frp"
+DEFAULT_MINUTES = "30"
 
 
 def auth() -> tuple[str, str]:
@@ -85,64 +87,59 @@ def print_job_logs(run_id: int, token: str, repo: str) -> None:
     job = jobs[0]
     logs = download(f"https://api.github.com/repos/{repo}/actions/jobs/{job['id']}/logs", token)
     lines = logs.splitlines()
-    start = next(
-        (i for i, line in enumerate(lines) if LOG_STEP_MARKER in line),
-        0,
-    )
+    start = next((i for i, line in enumerate(lines) if LOG_STEP_MARKER in line), 0)
     print("\n".join(lines[start:]))
-    print_answer(lines)
 
 
-def print_answer(lines: list[str]) -> None:
-    """从日志里抽出 CLAUDE ANSWER 标记之间的回答并高亮打印。"""
-    begin = next((i for i, line in enumerate(lines) if "CLAUDE ANSWER BEGIN" in line), None)
-    end = next((i for i, line in enumerate(lines) if "CLAUDE ANSWER END" in line), None)
-    if begin is None or end is None or end <= begin:
-        return
-    # 去掉每行前面的 GitHub 时间戳前缀。
-    answer = [re.sub(r"^\S+\s", "", ln) for ln in lines[begin + 1 : end]]
-    print("\n========== CLAUDE 回答 ==========")
-    print("\n".join(answer))
-    print("=================================\n")
+def frp_endpoint() -> tuple[str, str]:
+    """从 frpc.toml 读出 serverAddr 和 remotePort，用于拼连接命令。"""
+    text = (REPO_ROOT / "frpc.toml").read_text(encoding="utf-8")
+    host = re.search(r'serverAddr\s*=\s*"([^"]+)"', text)
+    port = re.search(r"remotePort\s*=\s*(\d+)", text)
+    return (host.group(1) if host else "<frps_ip>", port.group(1) if port else "<remotePort>")
+
+
+def tail_latest_logs() -> None:
+    token, repo = auth()
+    run = api("GET", "/actions/runs?per_page=1", token, repo)["workflow_runs"][0]
+    print(f"Run {run['id']}: {run['html_url']} ({run['status']}/{run.get('conclusion')})")
+    print_job_logs(run["id"], token, repo)
 
 
 def main() -> None:
-    prompt = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("CLAUDE_PROMPT", DEFAULT_PROMPT)
+    if len(sys.argv) > 1 and sys.argv[1] == "--logs":
+        tail_latest_logs()
+        return
+
+    minutes = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("SERVE_MINUTES", DEFAULT_MINUTES)
     token, repo = auth()
     workflow = next(
         item
         for item in api("GET", "/actions/workflows", token, repo)["workflows"]
         if item["path"].endswith(WORKFLOW_FILE)
     )
-    print(f"提问: {prompt!r}")
+    print(f"触发服务（存活 {minutes} 分钟）...")
     dispatch = api(
         "POST",
         f"/actions/workflows/{workflow['id']}/dispatches",
         token,
         repo,
-        {"ref": "main", "inputs": {"prompt": prompt, "cookie_file": "cookie.json"}},
+        {"ref": "main", "inputs": {"minutes": str(minutes), "cookie_file": "cookie.json"}},
     )
     if dispatch:
         print(json.dumps(dispatch, indent=2))
 
-    print("Workflow dispatched, waiting for run...")
+    print("已触发，等待运行出现...")
     time.sleep(8)
     run = api("GET", "/actions/runs?per_page=1", token, repo)["workflow_runs"][0]
-    run_id = run["id"]
-    print(f"Run {run_id}: {run['html_url']}")
+    print(f"Run {run['id']}: {run['html_url']}")
 
-    while True:
-        run = api("GET", f"/actions/runs/{run_id}", token, repo)
-        status = run["status"]
-        conclusion = run.get("conclusion")
-        print(f"status={status} conclusion={conclusion}")
-        if status == "completed":
-            print_job_logs(run_id, token, repo)
-            if conclusion != "success":
-                sys.exit(1)
-            print("Workflow succeeded")
-            return
-        time.sleep(20)
+    host, port = frp_endpoint()
+    print("\n登录约需 2-3 分钟。就绪后在你的控制台运行（流式实时输出）：")
+    print(f'  curl -N "http://{host}:{port}/ask?q=你的问题"')
+    print(f'  curl -N "http://{host}:{port}/new"      # 开启新对话（清空上下文）')
+    print(f'  curl    "http://{host}:{port}/health"   # 健康检查')
+    print(f"\n查看运行日志/排错: python {Path(__file__).name} --logs")
 
 
 if __name__ == "__main__":

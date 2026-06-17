@@ -1,0 +1,18 @@
+user = "VirtualMachine"
+
+serverAddr = "8.210.199.147"
+serverPort = 7000
+loginFailExit = false
+
+auth.method = "token"
+auth.token = "2f1d3a0e-9b64-4b91-b76b-8cb4a2f2e5d3"
+
+# 把 GitHub Actions runner 上 serve.py 的本机端口(8787) 暴露到 frps 公网端口(6000)。
+# 你的控制台访问： curl -N "http://8.210.199.147:6000/ask?q=你的问题"
+# 注意：remotePort 需在 frps 的 allowPorts 范围内（如被拒绝请改成允许的端口）。
+[[proxies]]
+name = "claude-ask"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 8787
+remotePort = 6000
