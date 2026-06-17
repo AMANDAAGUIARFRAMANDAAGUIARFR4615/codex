@@ -48,6 +48,23 @@ curl -N http://8.210.199.147:6000/v1/chat/completions \
 
 客户端「新对话」时若 messages 里只有一条 user 消息，服务会自动在 claude.ai 开新会话。
 
+### Agent / 工具调用（function calling）
+
+Cursor、Cline 等 **Agent 模式**依赖 OpenAI 的工具调用（先让模型回 `tool_calls`，
+客户端本地执行工具如「列目录 / 读文件」，再把结果回传）。claude.ai 网页端本身没有原生
+function calling，本服务用「基于提示词的 shim」补上：
+
+- 当请求带 `tools` 字段（且 `tool_choice` 不为 `"none"`）时进入工具模式。
+- 服务会把**整段对话**（system + 历史 + 工具结果）连同一段工具协议说明序列化后发给
+  claude.ai，并约定模型用 `<tool_call>{"name":...,"arguments":{...}}</tool_call>` 输出调用。
+- 拿到回答后解析回标准的 `tool_calls`（`finish_reason="tool_calls"`，流式同样支持）。
+- 工具模式下每轮都重发完整上下文，不依赖 claude.ai 的会话记忆，因此可无状态地多轮工具往返。
+
+普通聊天行为不变（只发最后一条 user 消息、靠浏览器侧保留上下文）。
+
+> 注意：工具是否真正执行由**客户端**完成（Cursor 在你本机跑 `list_dir` 等）；本服务只负责
+> 让 claude.ai 产出规范的工具调用并翻译成 OpenAI 格式。
+
 ## 运行环境
 
 GitHub Actions 使用 **macOS** runner + **patchright Chromium**（系统 Google Chrome 不支持加载未打包扩展）。

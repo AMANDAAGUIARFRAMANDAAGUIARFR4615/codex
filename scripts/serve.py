@@ -20,6 +20,7 @@ import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from typing import Callable
 from urllib.parse import urlparse
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent
@@ -134,7 +135,7 @@ class Handler(BaseHTTPRequestHandler):
     def _chat_completions(self):
         try:
             body = self._read_json()
-            prompt, should_reset, model = OAI.parse_messages(body)
+            parsed = OAI.parse_messages(body)
         except json.JSONDecodeError:
             self._json(400, OAI.error_payload("Invalid JSON body"))
             return
@@ -142,18 +143,25 @@ class Handler(BaseHTTPRequestHandler):
             self._json(400, OAI.error_payload(str(exc)))
             return
 
+        prompt, should_reset, model = parsed.prompt, parsed.should_reset, parsed.model
+
         stream = body.get("stream", True)
         if isinstance(stream, str):
             stream = stream.lower() not in ("false", "0", "no")
 
         completion_id = OAI.new_completion_id()
-        L.log(f"[openai] model={model} stream={stream} reset={should_reset} prompt={prompt[:60]!r}")
+        L.log(
+            f"[openai] model={model} stream={stream} reset={should_reset} "
+            f"tool_mode={parsed.tool_mode} prompt={prompt[:60]!r}"
+        )
 
         with self.server.lock:
             try:
                 if should_reset:
                     self._reset_conversation()
-                if stream:
+                if parsed.tool_mode:
+                    self._tool_completion(completion_id, model, prompt, stream)
+                elif stream:
                     self._stream_completion(completion_id, model, prompt)
                 else:
                     self._blocking_completion(completion_id, model, prompt)
@@ -172,7 +180,7 @@ class Handler(BaseHTTPRequestHandler):
         self.server.page.wait_for_timeout(1500)
         L.wait_for_claude_ready(self.server.page, timeout=60)
 
-    def _stream_completion(self, completion_id: str, model: str, prompt: str) -> None:
+    def _begin_sse(self) -> Callable[[bytes], None]:
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
@@ -184,10 +192,40 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(data)
             self.wfile.flush()
 
+        return write
+
+    def _stream_completion(self, completion_id: str, model: str, prompt: str) -> None:
+        write = self._begin_sse()
         emit = OAI.make_sse_delta_writer(completion_id, model, write)
         full = claude_ask.stream_answer(self.server.page, prompt, emit, org_uuid=self.server.org)
         OAI.write_sse_finish(completion_id, model, write)
         L.log(f"[openai] 流式完成（{len(full)} 字）")
+
+    def _tool_completion(self, completion_id: str, model: str, prompt: str, stream: bool) -> None:
+        """Agent / 工具调用：先取完整回答（无法边生成边判定是否工具调用），再决定输出。"""
+        full = claude_ask.stream_answer(
+            self.server.page,
+            prompt,
+            lambda _part: None,
+            org_uuid=self.server.org,
+        )
+        calls = OAI.extract_tool_calls(full)
+        content = OAI.strip_tool_calls(full)
+        L.log(f"[openai] 工具模式：解析出 {len(calls)} 个工具调用（回答 {len(full)} 字）")
+
+        if stream:
+            write = self._begin_sse()
+            if calls:
+                OAI.write_sse_tool_calls(completion_id, model, calls, write)
+            else:
+                emit = OAI.make_sse_delta_writer(completion_id, model, write)
+                emit(content)
+                OAI.write_sse_finish(completion_id, model, write)
+        else:
+            if calls:
+                self._json(200, OAI.tool_calls_payload(completion_id, model, calls))
+            else:
+                self._json(200, OAI.completion_payload(completion_id, model, content))
 
     def _blocking_completion(self, completion_id: str, model: str, prompt: str) -> None:
         full = claude_ask.stream_answer(
